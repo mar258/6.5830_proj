@@ -41,12 +41,27 @@ func AsBitmap(data []byte, numBits int) Bitmap {
 // SetBit sets the bit at index i to the given value.
 // Returns the previous value of the bit.
 func (b *Bitmap) SetBit(i int, on bool) (originalValue bool) {
-	panic("unimplemented")
+	wordIndex := i / 64
+	bitIndex := uint64(i % 64)
+	mask := uint64(1) << bitIndex
+	orig := b.words[wordIndex] & mask != 0
+
+	if on {
+		b.words[wordIndex] |= mask
+	} else {
+		b.words[wordIndex] &^= mask
+	}
+	
+	return orig
 }
 
 // LoadBit returns the value of the bit at index i.
 func (b *Bitmap) LoadBit(i int) bool {
-	panic("unimplemented")
+	wordIndex := i / 64
+	bitIndex := uint64(i % 64)
+
+	orig := b.words[wordIndex] & ((uint64(1)) << bitIndex) != 0;
+	return orig;
 }
 
 // FindFirstZero searches for the first bit set to 0 (false) in the bitmap.
@@ -56,5 +71,66 @@ func (b *Bitmap) LoadBit(i int) bool {
 //
 // Returns the index of the first zero bit found, or -1 if the bitmap is entirely full.
 func (b *Bitmap) FindFirstZero(startHint int) int {
-	panic("unimplemented")
+	wordIndex := startHint / 64
+	bitIndex := startHint % 64
+
+	idx := -1
+	found := false
+
+	for i := wordIndex; i < len(b.words); i++ {
+		startBit := 0
+		if i == wordIndex {
+			startBit = bitIndex
+		}
+
+		endBit := 64
+		if i == len(b.words)-1 {
+			remaining := b.numBits - i*64
+			if remaining < endBit {
+				endBit = remaining
+			}
+		}
+
+		for j := startBit; j < endBit; j++ {
+			mask := uint64(1) << uint(j)
+			if (b.words[i] & mask) == 0 { 
+				idx = (i * 64) + j
+				found = true
+				break
+			}
+		}
+		if found {
+			break
+		}
+	}
+
+	if !found {
+		for i := 0; i <= wordIndex && i < len(b.words); i++ {
+			endBit := 64
+			if i == wordIndex {
+				endBit = bitIndex
+			}
+
+			if i == len(b.words)-1 {
+				remaining := b.numBits - i*64
+				if remaining < endBit {
+					endBit = remaining
+				}
+			}
+
+			for j := 0; j < endBit; j++ {
+				mask := uint64(1) << uint(j)
+				if (b.words[i] & mask) == 0 { 
+					idx = (i * 64) + j
+					found = true
+					break
+				}
+			}
+			if found {
+				break
+			}
+		}
+	}
+
+	return idx
 }

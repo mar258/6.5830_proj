@@ -11,23 +11,43 @@ type HeapPage struct {
 }
 
 func (hp HeapPage) NumUsed() int {
-	panic("unimplemented")
+	result := 0
+	for i:= 12; i < 14; i++{
+		result = result << 8;
+		result += int(hp.PageFrame.Bytes[i])
+	}
+	return result
 }
 
 func (hp HeapPage) setNumUsed(numUsed int) {
-	panic("unimplemented")
+	hp.PageFrame.Bytes[12] = byte(numUsed >> 0);
+	hp.PageFrame.Bytes[13] = byte(numUsed >> 8);
+
 }
 
 func (hp HeapPage) NumSlots() int {
-	panic("unimplemented")
+	result := 0
+	for i:= 10; i < 12; i++{
+		result = result << 8;
+		result += int(hp.PageFrame.Bytes[i])
+	}
+	return result
 }
 
 func (hp HeapPage) RowSize() int {
-	panic("unimplemented")
+	result := 0
+	for i:= 8; i < 10; i++{
+		result = result << 8;
+		result += int(hp.PageFrame.Bytes[i])
+	}
+	return result
 }
 
 func InitializeHeapPage(desc *RawTupleDesc, frame *PageFrame) {
 	panic("unimplemented")
+	newPage := HeapPage{
+		*PageFrame: frame
+	}
 }
 
 func (frame *PageFrame) AsHeapPage() HeapPage {

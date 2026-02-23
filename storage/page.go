@@ -22,6 +22,15 @@ type PageFrame struct {
 	// Hint: You will need to add fields and synchronization structures here to track the state of this page.
 	pins  int32
 	dirty atomic.Bool
+	ref atomic.Bool
+}
+
+func (frame *PageFrame) getRef() bool {
+	return frame.ref.Load()
+}
+
+func (frame *PageFrame) setRef(ref bool) {
+	frame.ref.Store(ref)
 }
 
 func (frame *PageFrame) getPins() int {

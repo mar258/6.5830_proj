@@ -20,7 +20,30 @@ type PageFrame struct {
 	// PageLatch protects the content of the page from concurrent access.
 	PageLatch sync.RWMutex
 	// Hint: You will need to add fields and synchronization structures here to track the state of this page.
+	pins  int32
+	dirty atomic.Bool
 }
+
+func (frame *PageFrame) getPins() int {
+	return int(atomic.LoadInt32(&frame.pins))
+}
+
+func (frame *PageFrame) setPins(increment bool) {
+	if increment {
+		atomic.AddInt32(&frame.pins, 1)
+	} else {
+		atomic.AddInt32(&frame.pins, -1)
+	}
+}
+
+func (frame *PageFrame) getDirty() bool {
+	return frame.dirty.Load()
+}
+
+func (frame *PageFrame) setDirty(dirty bool) {
+	frame.dirty.Store(dirty)
+}
+
 
 // Detect system endianness -- compiler should statically replace this with a constant
 var isBigEndian = func() bool {

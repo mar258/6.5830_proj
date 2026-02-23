@@ -16,10 +16,9 @@ import (
 type BufferPool struct {
 	// add more fields here...
 	numPages       int
-	lock           sync.RWMutex
 	storageManager DBFileManager
 	buffer_cache   *xsync.MapOf[common.PageID, *PageFrame]
-	hand           int
+	lock           sync.RWMutex
 }
 
 // NewBufferPool creates a new BufferPool with a fixed capacity defined by numPages. It requires a
@@ -33,6 +32,14 @@ func NewBufferPool(numPages int, storageManager DBFileManager, logManager LogMan
 		buffer_cache:   xsync.NewMapOf[common.PageID, *PageFrame](),
 		lock:           sync.RWMutex{},
 	}
+	// for i := 0; i < numPages; i++ {
+    //     frame := &PageFrame{}
+	// 	frame.setPins(false)
+	// 	frame.setRef(false)
+	// 	frame.setDirty(false)
+    //     pool.buffer_cache.Store(common.PageID{Oid: 0, PageNum: int32(i)}, frame) 
+    // }
+	// return pool
 }
 
 // StorageManager returns the underlying disk manager.
@@ -47,15 +54,20 @@ func (bp *BufferPool) StorageManager() DBFileManager {
 func (bp *BufferPool) GetPage(pageID common.PageID) (*PageFrame, error) {
 	var resultFrame *PageFrame
 	var err error
-	bp.lock.Lock()
-	defer bp.lock.Unlock()
 
 	// hit
 	frame, ok := bp.buffer_cache.Load(pageID)
 	if ok {
-		frame.setPins(true)
-		frame.setRef(true)
-		return frame, nil
+		frame.PageLatch.Lock()
+		currentFrame, stillExists := bp.buffer_cache.Load(pageID)
+		if !stillExists || currentFrame != frame {
+			frame.PageLatch.Unlock()
+		}else{
+			frame.setPins(true)
+			frame.setRef(true)
+			frame.PageLatch.Unlock()
+			return frame, nil
+		}
 	}
 
 	// miss
@@ -74,15 +86,16 @@ func (bp *BufferPool) GetPage(pageID common.PageID) (*PageFrame, error) {
         }
         
         newFrame.setPins(true)
-        newFrame.setRef(true)
+        newFrame.setRef(false)
         bp.buffer_cache.Store(pageID, newFrame)
         return newFrame, nil
     }
 
 	// evict 
-	for pass := 0; pass < 2; pass ++{
+	for{
 		bp.buffer_cache.Range(func(id common.PageID, frame *PageFrame) bool {
-			if frame.getRef(){
+			
+			if frame.getRef() == true{
 				frame.setRef(false)
 				return true
 			}
@@ -90,6 +103,8 @@ func (bp *BufferPool) GetPage(pageID common.PageID) (*PageFrame, error) {
 			if frame.getPins() > 0{
 				return true
 			}
+			frame.PageLatch.Lock()
+			frame.setPins(true)
 
 			if frame.getDirty(){
 				file, _ := bp.StorageManager().GetDBFile(id.Oid)
@@ -100,25 +115,31 @@ func (bp *BufferPool) GetPage(pageID common.PageID) (*PageFrame, error) {
 			bp.buffer_cache.Delete(id)
 			file, err := bp.StorageManager().GetDBFile(pageID.Oid)
 			if err != nil{
+				frame.PageLatch.Unlock()
 				return false
 			}
 			err = file.ReadPage(int(pageID.PageNum), frame.Bytes[:])
 			if err != nil{
+				frame.PageLatch.Unlock()
 				return false
 			}
 			bp.buffer_cache.Store(pageID, frame)
-			frame.setPins(true)
+			frame.PageLatch.Unlock()
+			frame.setRef(true)
 			resultFrame = frame
 			return false
 	
 		})
+		if resultFrame != nil{
+			break
+		}
 	}
 
-	if resultFrame == nil || err != nil{
+	if resultFrame == nil{
 		return nil, err
 	}
 
-	return resultFrame, err
+	return resultFrame, nil
 }
 
 // UnpinPage indicates that the caller is done using a page. It unpins the page, making the page potentially evictable

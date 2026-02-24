@@ -29,8 +29,8 @@ func (frame *PageFrame) getRef() bool {
 	return frame.ref.Load()
 }
 
-func (frame *PageFrame) setRef(ref bool) {
-	frame.ref.Store(ref)
+func (frame *PageFrame) setRef(set bool) {
+	frame.ref.Store(set)
 }
 
 func (frame *PageFrame) getPins() int {

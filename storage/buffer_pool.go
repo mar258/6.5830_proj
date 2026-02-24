@@ -2,8 +2,7 @@ package storage
 
 import (
 	"mit.edu/dsg/godb/common"
-	"github.com/puzpuzpuz/xsync/v3"
-	"sync"
+	"github.com/puzpuzpuz/xsync/v4"
 )
 
 // BufferPool manages the reading and writing of database pages between the DiskFileManager and memory.
@@ -18,7 +17,6 @@ type BufferPool struct {
 	numPages       int
 	storageManager DBFileManager
 	buffer_cache   *xsync.MapOf[common.PageID, *PageFrame]
-	lock           sync.RWMutex
 }
 
 // NewBufferPool creates a new BufferPool with a fixed capacity defined by numPages. It requires a
@@ -30,7 +28,6 @@ func NewBufferPool(numPages int, storageManager DBFileManager, logManager LogMan
 		numPages: numPages,
 		storageManager: storageManager,
 		buffer_cache:   xsync.NewMapOf[common.PageID, *PageFrame](),
-		lock:           sync.RWMutex{},
 	}
 	// for i := 0; i < numPages; i++ {
     //     frame := &PageFrame{}
@@ -54,84 +51,81 @@ func (bp *BufferPool) StorageManager() DBFileManager {
 func (bp *BufferPool) GetPage(pageID common.PageID) (*PageFrame, error) {
 	var resultFrame *PageFrame
 	var err error
-
-	// hit
-	frame, ok := bp.buffer_cache.Load(pageID)
-	if ok {
-		frame.PageLatch.Lock()
-		currentFrame, stillExists := bp.buffer_cache.Load(pageID)
-		if !stillExists || currentFrame != frame {
-			frame.PageLatch.Unlock()
-		}else{
-			frame.setPins(true)
-			frame.setRef(true)
-			frame.PageLatch.Unlock()
-			return frame, nil
-		}
-	}
-
-	// miss
-
-	// space in cache
-	if bp.buffer_cache.Size() < bp.numPages {
-        newFrame := &PageFrame{}
-        
-        file, err := bp.StorageManager().GetDBFile(pageID.Oid)
-        if err != nil {
-            return nil, err
-        }
-        err = file.ReadPage(int(pageID.PageNum), newFrame.Bytes[:])
-        if err != nil {
-            return nil, err
-        }
-        
-        newFrame.setPins(true)
-        newFrame.setRef(false)
-        bp.buffer_cache.Store(pageID, newFrame)
-        return newFrame, nil
-    }
-
-	// evict 
 	for{
-		bp.buffer_cache.Range(func(id common.PageID, frame *PageFrame) bool {
-			
-			if frame.getRef() == true{
-				frame.setRef(false)
-				return true
-			}
-
-			if frame.getPins() > 0{
-				return true
-			}
-			frame.PageLatch.Lock()
+		// hit
+		frame, ok := bp.buffer_cache.Load(pageID)
+		if ok {
 			frame.setPins(true)
-
-			if frame.getDirty(){
-				file, _ := bp.StorageManager().GetDBFile(id.Oid)
-				_ = file.WritePage(int(id.PageNum), frame.Bytes[:])
-				frame.setDirty(false)
-			}
-
-			bp.buffer_cache.Delete(id)
-			file, err := bp.StorageManager().GetDBFile(pageID.Oid)
-			if err != nil{
-				frame.PageLatch.Unlock()
-				return false
-			}
-			err = file.ReadPage(int(pageID.PageNum), frame.Bytes[:])
-			if err != nil{
-				frame.PageLatch.Unlock()
-				return false
-			}
-			bp.buffer_cache.Store(pageID, frame)
-			frame.PageLatch.Unlock()
 			frame.setRef(true)
-			resultFrame = frame
-			return false
-	
-		})
-		if resultFrame != nil{
-			break
+			return frame, nil
+			
+		}
+
+		// miss
+
+		// space in cache
+		if bp.buffer_cache.Size() < bp.numPages {
+			newFrame := &PageFrame{}
+			
+			file, err := bp.StorageManager().GetDBFile(pageID.Oid)
+			if err != nil {
+				return nil, err
+			}
+			err = file.ReadPage(int(pageID.PageNum), newFrame.Bytes[:])
+			if err != nil {
+				return nil, err
+			}
+			
+			newFrame.setPins(true)
+			newFrame.setRef(false)
+			bp.buffer_cache.Store(pageID, newFrame)
+			return newFrame, nil
+		}
+
+		// evict 
+		for i:=0; i<2; i++ {
+			bp.buffer_cache.RangeRelaxed(func(id common.PageID, frame *PageFrame) bool {
+				
+				if frame.getRef() == true{
+					frame.setRef(false)
+					return true
+				}
+
+				if frame.getPins() > 0{
+					return true
+				}
+				if !frame.PageLatch.TryLock() {
+					return true
+				}
+				frame.setPins(true)
+
+				if frame.getDirty(){
+					file, _ := bp.StorageManager().GetDBFile(id.Oid)
+					_ = file.WritePage(int(id.PageNum), frame.Bytes[:])
+					frame.setDirty(false)
+				}
+
+				bp.buffer_cache.Delete(id)
+				file, err := bp.StorageManager().GetDBFile(pageID.Oid)
+				if err != nil{
+					frame.PageLatch.Unlock()
+					return false
+				}
+				err = file.ReadPage(int(pageID.PageNum), frame.Bytes[:])
+				if err != nil{
+					frame.PageLatch.Unlock()
+					return false
+				}
+				bp.buffer_cache.LoadOrStore(pageID, frame)
+				frame.PageLatch.Unlock()
+				frame.setRef(true)
+				resultFrame = frame
+				return false
+		
+			})
+			if resultFrame != nil{
+				return resultFrame, nil
+			}
 		}
 	}
 
@@ -146,10 +140,10 @@ func (bp *BufferPool) GetPage(pageID common.PageID) (*PageFrame, error) {
 // if no other thread is accessing it. If the setDirty flag is true, the page is marked as modified, ensuring
 // it will be written back to disk before eviction.
 func (bp *BufferPool) UnpinPage(frame *PageFrame, setDirty bool) {
-	frame.setPins(false)
 	if setDirty{
 		frame.setDirty(true)
 	}
+	frame.setPins(false)
 }
 
 // FlushAllPages flushes all dirty pages to disk that have an LSN less than `flushedUntil`, regardless of pins.
@@ -157,15 +151,15 @@ func (bp *BufferPool) UnpinPage(frame *PageFrame, setDirty bool) {
 func (bp *BufferPool) FlushAllPages() error {
 	var flushErr error
 	bp.buffer_cache.Range(func(id common.PageID, frame *PageFrame) bool {
-		frame.PageLatch.Lock()
-		defer frame.PageLatch.Unlock()
 		if frame.getDirty() {
 			file, err := bp.StorageManager().GetDBFile(id.Oid)
 			if err != nil {
 				flushErr = err
 				return false
 			}
+			frame.PageLatch.Lock()
 			err = file.WritePage(int(id.PageNum), frame.Bytes[:])
+			frame.PageLatch.Unlock()
 			if err != nil {
 				flushErr = err
 				return false

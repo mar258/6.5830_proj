@@ -17,6 +17,7 @@ type BufferPool struct {
 	numPages       int
 	storageManager DBFileManager
 	buffer_cache   *xsync.MapOf[common.PageID, *PageFrame]
+	frames [*PageFrame]
 }
 
 // NewBufferPool creates a new BufferPool with a fixed capacity defined by numPages. It requires a
@@ -24,10 +25,15 @@ type BufferPool struct {
 //
 // Hint: You will need to worry about logManager until Lab 3
 func NewBufferPool(numPages int, storageManager DBFileManager, logManager LogManager) *BufferPool {
+	frames := make([]*PageFrame, numPages)
+	for i := 0; i < numPages; i++ {
+		frames[i] = &PageFrame{}
+	}
 	return &BufferPool{
 		numPages: numPages,
 		storageManager: storageManager,
 		buffer_cache:   xsync.NewMapOf[common.PageID, *PageFrame](),
+		frames: frames,
 	}
 	// for i := 0; i < numPages; i++ {
     //     frame := &PageFrame{}
@@ -57,7 +63,7 @@ func (bp *BufferPool) GetPage(pageID common.PageID) (*PageFrame, error) {
 		if ok {
 			frame.lock.Lock()
 			if frame.getEvicting() == false{
-				frame.setPins(true)
+				frame.setPins(1)
 				frame.setRef(true)
 				frame.lock.Unlock()
 				return frame, nil
@@ -79,10 +85,10 @@ func (bp *BufferPool) GetPage(pageID common.PageID) (*PageFrame, error) {
 			if err != nil {
 				return nil, err
 			}
-			
-			newFrame.setPins(true)
-			newFrame.setRef(false)
-			bp.buffer_cache.Store(pageID, newFrame)
+			newFrame.lock.Lock()
+			newFrame.setPins(1)
+			newFrame.lock.Unlock()
+			newFrame, _ = bp.buffer_cache.LoadOrStore(pageID, newFrame)
 			return newFrame, nil
 		}
 
@@ -90,6 +96,12 @@ func (bp *BufferPool) GetPage(pageID common.PageID) (*PageFrame, error) {
 		for i:=0; i<2; i++ {
 			bp.buffer_cache.RangeRelaxed(func(id common.PageID, frame *PageFrame) bool {
 				frame.lock.Lock()
+
+				if frame.getEvicting() == true{
+					frame.lock.Unlock()
+					return true
+				}
+
 				if frame.getRef() == true{
 					frame.setRef(false)
 					frame.lock.Unlock()
@@ -104,7 +116,7 @@ func (bp *BufferPool) GetPage(pageID common.PageID) (*PageFrame, error) {
 					frame.lock.Unlock()
 					return true
 				}
-				frame.setPins(true)
+				frame.setPins(1)
 				frame.setEvicting(true)
 				frame.lock.Unlock()
 
@@ -113,7 +125,7 @@ func (bp *BufferPool) GetPage(pageID common.PageID) (*PageFrame, error) {
 					_ = file.WritePage(int(id.PageNum), frame.Bytes[:])
 					frame.setDirty(false)
 				}
-
+				
 				bp.buffer_cache.Delete(id)
 				file, err := bp.StorageManager().GetDBFile(pageID.Oid)
 				if err != nil{
@@ -125,8 +137,11 @@ func (bp *BufferPool) GetPage(pageID common.PageID) (*PageFrame, error) {
 					frame.PageLatch.Unlock()
 					return false
 				}
-				bp.buffer_cache.LoadOrStore(pageID, frame)
+
+				frame.setEvicting(false)
 				frame.PageLatch.Unlock()
+				frame, _ = bp.buffer_cache.LoadOrStore(pageID, frame)
+				
 				resultFrame = frame
 				return false
 		
@@ -151,7 +166,7 @@ func (bp *BufferPool) UnpinPage(frame *PageFrame, setDirty bool) {
 	if setDirty{
 		frame.setDirty(true)
 	}
-	frame.setPins(false)
+	frame.setPins(-1)
 }
 
 // FlushAllPages flushes all dirty pages to disk that have an LSN less than `flushedUntil`, regardless of pins.

@@ -48,12 +48,8 @@ func (frame *PageFrame) getPins() int {
 	return int(atomic.LoadInt32(&frame.pins))
 }
 
-func (frame *PageFrame) setPins(increment bool) {
-	if increment {
-		atomic.AddInt32(&frame.pins, 1)
-	} else {
-		atomic.AddInt32(&frame.pins, -1)
-	}
+func (frame *PageFrame) setPins(increment int) {
+	atomic.AddInt32(&frame.pins, int32(increment))
 }
 
 func (frame *PageFrame) getDirty() bool {

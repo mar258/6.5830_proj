@@ -55,10 +55,14 @@ func (bp *BufferPool) GetPage(pageID common.PageID) (*PageFrame, error) {
 		// hit
 		frame, ok := bp.buffer_cache.Load(pageID)
 		if ok {
-			frame.setPins(true)
-			frame.setRef(true)
-			return frame, nil
-			
+			frame.lock.Lock()
+			if frame.getEvicting() == false{
+				frame.setPins(true)
+				frame.setRef(true)
+				frame.lock.Unlock()
+				return frame, nil
+			}
+			frame.lock.Unlock()
 		}
 
 		// miss
@@ -85,19 +89,24 @@ func (bp *BufferPool) GetPage(pageID common.PageID) (*PageFrame, error) {
 		// evict 
 		for i:=0; i<2; i++ {
 			bp.buffer_cache.RangeRelaxed(func(id common.PageID, frame *PageFrame) bool {
-				
+				frame.lock.Lock()
 				if frame.getRef() == true{
 					frame.setRef(false)
+					frame.lock.Unlock()
 					return true
 				}
 
 				if frame.getPins() > 0{
+					frame.lock.Unlock()
 					return true
 				}
 				if !frame.PageLatch.TryLock() {
+					frame.lock.Unlock()
 					return true
 				}
 				frame.setPins(true)
+				frame.setEvicting(true)
+				frame.lock.Unlock()
 
 				if frame.getDirty(){
 					file, _ := bp.StorageManager().GetDBFile(id.Oid)
@@ -118,7 +127,6 @@ func (bp *BufferPool) GetPage(pageID common.PageID) (*PageFrame, error) {
 				}
 				bp.buffer_cache.LoadOrStore(pageID, frame)
 				frame.PageLatch.Unlock()
-				frame.setRef(true)
 				resultFrame = frame
 				return false
 		
@@ -151,7 +159,9 @@ func (bp *BufferPool) UnpinPage(frame *PageFrame, setDirty bool) {
 func (bp *BufferPool) FlushAllPages() error {
 	var flushErr error
 	bp.buffer_cache.Range(func(id common.PageID, frame *PageFrame) bool {
+		frame.lock.Lock()
 		if frame.getDirty() {
+			frame.lock.Unlock()
 			file, err := bp.StorageManager().GetDBFile(id.Oid)
 			if err != nil {
 				flushErr = err
@@ -165,6 +175,8 @@ func (bp *BufferPool) FlushAllPages() error {
 				return false
 			}
 			frame.setDirty(false)
+		}else{
+			frame.lock.Unlock()
 		}
 		return true
 	})

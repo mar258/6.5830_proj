@@ -20,10 +20,21 @@ type PageFrame struct {
 	// PageLatch protects the content of the page from concurrent access.
 	PageLatch sync.RWMutex
 	// Hint: You will need to add fields and synchronization structures here to track the state of this page.
+	lock sync.Mutex
 	pins  int32
 	dirty atomic.Bool
 	ref atomic.Bool
+	isEvicting atomic.Bool
 }
+
+func (frame *PageFrame) getEvicting() bool {
+	return frame.isEvicting.Load()
+}
+
+func (frame *PageFrame) setEvicting(set bool) {
+	frame.isEvicting.Store(set)
+}
+
 
 func (frame *PageFrame) getRef() bool {
 	return frame.ref.Load()

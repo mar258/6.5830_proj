@@ -25,15 +25,19 @@ type PageFrame struct {
 	dirty atomic.Bool
 	ref atomic.Bool
 	isEvicting atomic.Bool
-	pageID common.PageID
+	pageID atomic.Value // atomic.Value stores common.PageID
 }
 
 func (frame *PageFrame) getPageID() common.PageID {
-	return frame.pageID
+	val := frame.pageID.Load()
+	if val == nil {
+		return common.PageID{} 
+	}
+	return val.(common.PageID)
 }
 
 func (frame *PageFrame) setPageID(id common.PageID) {
-	frame.pageID = id
+	frame.pageID.Store(id)
 }
 
 func (frame *PageFrame) getEvicting() bool {

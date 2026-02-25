@@ -38,6 +38,7 @@ func (tableHeap *TableHeap) StorageSchema() *storage.RawTupleDesc {
 
 // InsertTuple inserts a tuple into the TableHeap. It should find a free space, allocating if needed, and return the found slot.
 func (tableHeap *TableHeap) InsertTuple(txn *transaction.TransactionContext, row storage.RawTuple) (common.RecordID, error) {
+	panic("unimplemented")
 	storageManager := tableHeap.bufferPool.StorageManager()
 	file, err := storageManager.GetDBFile(tableHeap.Oid)
 	if err != nil{

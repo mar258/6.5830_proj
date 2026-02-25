@@ -25,6 +25,15 @@ type PageFrame struct {
 	dirty atomic.Bool
 	ref atomic.Bool
 	isEvicting atomic.Bool
+	pageID common.PageID
+}
+
+func (frame *PageFrame) getPageID() common.PageID {
+	return frame.pageID
+}
+
+func (frame *PageFrame) setPageID(id common.PageID) {
+	frame.pageID = id
 }
 
 func (frame *PageFrame) getEvicting() bool {

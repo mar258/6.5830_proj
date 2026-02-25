@@ -104,6 +104,20 @@ var ErrTupleDeleted = errors.New("tuple has been deleted")
 // DeleteTuple marks a tuple as deleted in the TableHeap. If the tuple has been deleted, return ErrTupleDeleted
 func (tableHeap *TableHeap) DeleteTuple(txn *transaction.TransactionContext, rid common.RecordID) error {
 	panic("unimplemented")
+	frame := tableHeap.bufferPool.GetPage(rid.pageID)
+	page := frame.AsHeapPage()
+	if page.IsDeleted(){
+		return ErrTupleDeleted
+	}
+
+	if !page.IsAllocated(){
+		return ErrTupleDeleted
+	}
+
+	page.MarkDeleted(rid, true)
+	frame.UnpinPage(rid, true)
+	return nil
+
 }
 
 // ReadTuple reads the physical bytes of a tuple into the provided buffer. If forUpdate is true, read should acquire

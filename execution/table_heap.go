@@ -22,7 +22,13 @@ type TableHeap struct {
 
 // NewTableHeap creates a TableHeap and performs a metadata scan to initialize stats.
 func NewTableHeap(table *catalog.Table, bufferPool *storage.BufferPool, logManager storage.LogManager, lockManager *transaction.LockManager) (*TableHeap, error) {
-	panic("unimplemented")
+	return &TableHeap{
+		oid: table.Oid,
+		desc: table.Desc,
+		bufferPool: bufferPool,
+		logManager: logManager,
+		lockManager: lockManager,
+	}, nil
 }
 
 // StorageSchema returns the physical byte-layout descriptor of the tuples in this table.
@@ -32,7 +38,64 @@ func (tableHeap *TableHeap) StorageSchema() *storage.RawTupleDesc {
 
 // InsertTuple inserts a tuple into the TableHeap. It should find a free space, allocating if needed, and return the found slot.
 func (tableHeap *TableHeap) InsertTuple(txn *transaction.TransactionContext, row storage.RawTuple) (common.RecordID, error) {
-	panic("unimplemented")
+	storageManager := tableHeap.bufferPool.StorageManager()
+	file, err := storageManager.GetDBFile(tableHeap.Oid)
+	if err != nil{
+		return common.RecordID{}, err
+	}
+	numPages, err := storageManager.NumPages()
+	if err != nil{
+		return common.RecordID{}, err
+	}
+
+	for numPage := 0; numPage < numPages; numPage++{
+		pageId = common.PageID{Oid: tableHeap.Oid, PageNum: numPage}
+		frame, err := tableHeap.GetPage(pageId)
+		if err != nil{
+			continue
+		}
+		heapPage = frame.AsHeapPage()
+		freeSlot := heapPage.FindFreeSlot()
+		if freeSlot > 0{
+			rid:= common.RecordId{PageID; pageId, Slot:freeSlot}
+			frame.PageLatch.Lock()
+			tuple := heapPage.AccessTuple(rid)
+			copy(tuple, row)
+			heapPage.MarkAllocated(rid, true)
+			frame.PageLatch.Unlock()
+			tableHeap.bufferPool.Unpin(frame, true)
+			return rid, nil
+		}
+		tableHeap.bufferPool.Unpin(frame, false)
+	}
+
+	// allocate 
+	numPage, err := storageManager.AllocatePage(1)
+	if err != nil {
+		return common.RecordID{}, err
+	}
+	pageId = common.PageID{Oid: tableHeap.Oid, PageNum: numPage}
+	frame, err := tableHeap.GetPage(pageId)
+	if err != nil {
+		return common.RecordID{}, err
+	}
+	frame.PageLatch.Lock()
+	frame.InitializeHeapPage(tableHeap.desc, frame)
+	heapPage := frame.AsHeapPage()
+	freeSlot := heapPage.FindFreeSlot()
+	if freeSlot > 0{
+		return common.RecordID{}, err
+	}
+	rid:= common.RecordId{PageID; pageId, Slot:freeSlot}
+	tuple := heapPage.AccessTuple(rid)
+	copy(tuple, row)
+	heapPage.MarkAllocated(rid, true)
+	frame.PageLatch.Unlock()
+
+	tableHeap.bufferPool.Unpin(frame, true)
+
+	return rid, nil
+
 }
 
 var ErrTupleDeleted = errors.New("tuple has been deleted")

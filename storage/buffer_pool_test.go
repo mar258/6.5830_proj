@@ -493,14 +493,17 @@ func TestBufferPool_Concurrent_Large(t *testing.T) {
 			case <-time.After(time.Millisecond):
 				// Scan all pages to ensure no negative balances exist
 				for i := 0; i < numPages; i++ {
+					// fmt.Printf("496")
 					pid := common.PageID{Oid: oid, PageNum: int32(i)}
 					p, err := bp.GetPage(pid)
+					// fmt.Printf("Reader got page")
 					assert.NoError(t, err, "Failed to get page for writing")
 					p.PageLatch.RLock()
 					val := int64(binary.LittleEndian.Uint64(p.Bytes[:]))
 					assert.True(t, val >= 0, "Reader found negative balance on page %d: %d", i, val)
 					p.PageLatch.RUnlock()
 					bp.UnpinPage(p, false)
+					// fmt.Printf("Reader unpin page")
 					runtime.Gosched()
 				}
 			}
@@ -519,24 +522,30 @@ func TestBufferPool_Concurrent_Large(t *testing.T) {
 				pidLow, pidHigh := selectPages(r, numPages, oid)
 
 				pLow, err := bp.GetPage(pidLow)
+				// fmt.Printf("Worker got page (524)")
 				assert.NoError(t, err, "Failed to get page for writing")
+				// fmt.Printf("Lock (526)")
 				pLow.PageLatch.Lock()
+				// fmt.Printf("528")
 				balLow := int64(binary.LittleEndian.Uint64(pLow.Bytes[:]))
 				if balLow <= 0 {
+					// fmt.Printf("Unlock (530)")
 					pLow.PageLatch.Unlock()
 					bp.UnpinPage(pLow, false)
 					continue
 				}
 				runtime.Gosched()
 				pHigh, err := bp.GetPage(pidHigh)
+				// fmt.Printf("worker got page (534)")
 				assert.NoError(t, err, "Failed to get page for writing")
+				// fmt.Printf("worker lock (540)")
 				pHigh.PageLatch.Lock()
 				// Transfer
 				balHigh := binary.LittleEndian.Uint64(pHigh.Bytes[:])
 				binary.LittleEndian.PutUint64(pLow.Bytes[:], uint64(balLow-1))
 				runtime.Gosched()
 				binary.LittleEndian.PutUint64(pHigh.Bytes[:], balHigh+1)
-
+				// fmt.Printf("worker unlock page (547)")
 				pHigh.PageLatch.Unlock()
 				pLow.PageLatch.Unlock()
 				bp.UnpinPage(pHigh, true)

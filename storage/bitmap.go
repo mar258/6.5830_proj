@@ -23,9 +23,17 @@ type Bitmap struct {
 // 1. data must be aligned to 8 bytes to allow safe casting to uint64.
 // 2. data must be large enough to contain numBits (rounded up to the nearest 8-byte word).
 func AsBitmap(data []byte, numBits int) Bitmap {
-	common.Assert(common.AlignedTo8(len(data)), "Bitmap bytes length must be aligned to 8")
-
 	numWords := (numBits + 63) / 64
+
+	// Edge case: an empty bitmap (no bits to track) should not attempt to index data[0].
+	if numWords == 0 {
+		return Bitmap{
+			words:   nil,
+			numBits: numBits,
+		}
+	}
+
+	common.Assert(common.AlignedTo8(len(data)), "Bitmap bytes length must be aligned to 8")
 	common.Assert(len(data) >= numWords*8, "bitmap buffer too small")
 
 	ptr := unsafe.Pointer(&data[0])

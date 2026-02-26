@@ -4,7 +4,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/puzpuzpuz/xsync/v4"
+	"github.com/puzpuzpuz/xsync/v3"
 	"mit.edu/dsg/godb/common"
 )
 
@@ -19,10 +19,10 @@ type BufferPool struct {
 	// add more fields here...
 	numPages       int
 	storageManager DBFileManager
-	buffer_cache   *xsync.Map[common.PageID, *PageFrame]
+	buffer_cache   *xsync.MapOf[common.PageID, *PageFrame]
 	frames         []*PageFrame
 	hand           uint64
-	pageLocks      *xsync.Map[common.PageID, *sync.Mutex]
+	pageLocks      *xsync.MapOf[common.PageID, *sync.Mutex]
 	evictLock      sync.Mutex
 }
 
@@ -38,9 +38,9 @@ func NewBufferPool(numPages int, storageManager DBFileManager, logManager LogMan
 	return &BufferPool{
 		numPages:       numPages,
 		storageManager: storageManager,
-		buffer_cache:   xsync.NewMap[common.PageID, *PageFrame](),
+		buffer_cache:   xsync.NewMapOf[common.PageID, *PageFrame](),
 		frames:         frames,
-		pageLocks:      xsync.NewMap[common.PageID, *sync.Mutex](),
+		pageLocks:      xsync.NewMapOf[common.PageID, *sync.Mutex](),
 	}
 }
 
@@ -53,7 +53,7 @@ func (bp *BufferPool) StorageManager() DBFileManager {
 // unpinned) and ready for use. If the page is already in the pool, the cached bytes are returned. If the page is not
 // present, the method must first make space by selecting a victim frame to evict
 // (potentially writing it to disk if dirty), and then read the requested page from disk into that frame.
-func (bp *BufferPool) GetPage(pageID common.PageID) (*PageFrame, error) {    
+func (bp *BufferPool) GetPage(pageID common.PageID) (*PageFrame, error) {
 	var pageLock *sync.Mutex
 	if lock, ok := bp.pageLocks.Load(pageID); ok {
 		pageLock = lock
@@ -69,7 +69,7 @@ func (bp *BufferPool) GetPage(pageID common.PageID) (*PageFrame, error) {
 	frame, ok := bp.buffer_cache.Load(pageID)
 	if ok {
 		frame.lock.Lock()
-		if frame.getEvicting() == false && frame.getPageID() == pageID{
+		if frame.getEvicting() == false && frame.getPageID() == pageID {
 			frame.setPins(1)
 			frame.setRef(true)
 			frame.lock.Unlock()
@@ -79,8 +79,6 @@ func (bp *BufferPool) GetPage(pageID common.PageID) (*PageFrame, error) {
 	}
 
 	// miss
-	bp.evictLock.Lock()
-	defer bp.evictLock.Unlock()
 
 	for i := 0; i < 100; i++ {
 		idx := int((atomic.AddUint64(&bp.hand, 1) - 1)) % bp.numPages
@@ -90,7 +88,6 @@ func (bp *BufferPool) GetPage(pageID common.PageID) (*PageFrame, error) {
 
 		if frame.getPins() > 0 {
 			frame.lock.Unlock()
-
 			continue
 		}
 
@@ -107,10 +104,8 @@ func (bp *BufferPool) GetPage(pageID common.PageID) (*PageFrame, error) {
 		frame.setEvicting(true)
 
 		id := frame.getPageID()
-		bp.buffer_cache.Delete(id)
 
 		if frame.getDirty() {
-			frame.lock.Unlock()
 			file, err := bp.StorageManager().GetDBFile(id.Oid)
 			if err != nil {
 				frame.setEvicting(false)
@@ -118,21 +113,19 @@ func (bp *BufferPool) GetPage(pageID common.PageID) (*PageFrame, error) {
 				return nil, err
 			}
 
-			frame.PageLatch.Lock()
+			frame.PageLatch.RLock()
 			err = file.WritePage(int(id.PageNum), frame.Bytes[:])
-			frame.PageLatch.Unlock()
+			frame.PageLatch.RUnlock()
 
 			if err != nil {
-				frame.lock.Lock()
 				frame.setEvicting(false)
 				frame.lock.Unlock()
 				return nil, err
 			}
 
-			frame.lock.Lock()
 			frame.setDirty(false)
 		}
-		frame.lock.Unlock()
+		bp.buffer_cache.Delete(id)
 
 		currFile, err := bp.StorageManager().GetDBFile(pageID.Oid)
 		if err != nil {
@@ -147,35 +140,29 @@ func (bp *BufferPool) GetPage(pageID common.PageID) (*PageFrame, error) {
 		frame.PageLatch.Unlock()
 
 		if err != nil {
-			frame.lock.Lock()
 			frame.setEvicting(false)
 			frame.lock.Unlock()
 			return nil, err
 		}
-
-		frame.lock.Lock()
 		frame.setPins(1)
 		frame.setPageID(pageID)
 		frame.setRef(false)
 		bp.buffer_cache.Store(pageID, frame)
 		frame.setEvicting(false)
 		frame.lock.Unlock()
-
 		return frame, nil
 	}
 
-	// fallback: evict a first page
+	// fallback: evict next non evicting page
 	for {
 		frame = bp.frames[int((atomic.AddUint64(&bp.hand, 1)-1))%bp.numPages]
 		frame.lock.Lock()
-		if frame.getEvicting() == false{
+		if frame.getEvicting() == false {
 			break
 		}
 		frame.lock.Unlock()
 	}
-	// frame = bp.frames[int((atomic.AddUint64(&bp.hand, 1)-1))%bp.numPages]
 
-	// frame.lock.Lock()
 
 	// Mark this frame as evicting and reset its pin count before reuse.
 	frame.setEvicting(true)
@@ -184,34 +171,28 @@ func (bp *BufferPool) GetPage(pageID common.PageID) (*PageFrame, error) {
 	}
 
 	id := frame.getPageID()
-	bp.buffer_cache.Delete(id)
 	if frame.getDirty() {
-		frame.lock.Unlock()
 		file, err := bp.StorageManager().GetDBFile(id.Oid)
 		if err != nil {
-			frame.lock.Lock()
 			frame.setEvicting(false)
 			frame.lock.Unlock()
 			return nil, err
 		}
-		frame.PageLatch.Lock()
+		frame.PageLatch.RLock()
 		err = file.WritePage(int(id.PageNum), frame.Bytes[:])
-		frame.PageLatch.Unlock()
+		frame.PageLatch.RUnlock()
 
 		if err != nil {
-			frame.lock.Lock()
 			frame.setEvicting(false)
 			frame.lock.Unlock()
 			return nil, err
 		}
 
-		frame.lock.Lock()
 		frame.setDirty(false)
 	}
-	frame.lock.Unlock()
+	bp.buffer_cache.Delete(id)
 	currFile, err := bp.StorageManager().GetDBFile(pageID.Oid)
 	if err != nil {
-		frame.lock.Lock()
 		frame.setEvicting(false)
 		frame.lock.Unlock()
 		return nil, err
@@ -222,13 +203,11 @@ func (bp *BufferPool) GetPage(pageID common.PageID) (*PageFrame, error) {
 	frame.PageLatch.Unlock()
 
 	if err != nil {
-		frame.lock.Lock()
 		frame.setEvicting(false)
 		frame.lock.Unlock()
 		return nil, err
 	}
 
-	frame.lock.Lock()
 	frame.setPins(1)
 	frame.setPageID(pageID)
 	bp.buffer_cache.Store(pageID, frame)
@@ -243,7 +222,6 @@ func (bp *BufferPool) GetPage(pageID common.PageID) (*PageFrame, error) {
 // if no other thread is accessing it. If the setDirty flag is true, the page is marked as modified, ensuring
 // it will be written back to disk before eviction.
 func (bp *BufferPool) UnpinPage(frame *PageFrame, setDirty bool) {
-	// fmt.Printf("Lock line 191\n")
 	frame.lock.Lock()
 	if setDirty {
 		frame.setDirty(true)
@@ -257,31 +235,23 @@ func (bp *BufferPool) UnpinPage(frame *PageFrame, setDirty bool) {
 func (bp *BufferPool) FlushAllPages() error {
 	var flushErr error
 	bp.buffer_cache.Range(func(id common.PageID, frame *PageFrame) bool {
-		// fmt.Printf("Lock line 204\n")
 		frame.lock.Lock()
 		currId := frame.getPageID()
-		if frame.getDirty() && frame.getEvicting() != true && currId == id{
-			// fmt.Printf("Unlock line 215\n")
-			// frame.lock.Unlock()
+		if frame.getDirty() && frame.getEvicting() != true && currId == id {
 			file, err := bp.StorageManager().GetDBFile(id.Oid)
 			if err != nil {
 				flushErr = err
 				return false
 			}
-			// fmt.Printf("Lock line 213\n")
-			frame.PageLatch.Lock()
+			frame.PageLatch.RLock()
 			err = file.WritePage(int(id.PageNum), frame.Bytes[:])
-			// fmt.Printf("Unlock line 224\n")
-			frame.PageLatch.Unlock()
+			frame.PageLatch.RUnlock()
 			if err != nil {
 				flushErr = err
 				return false
 			}
-			// fmt.Printf("Lock line 220\n")
-			// frame.lock.Lock()
 			frame.setDirty(false)
 		}
-		// fmt.Printf("Unlock line 233\n")
 		frame.lock.Unlock()
 		return true
 	})

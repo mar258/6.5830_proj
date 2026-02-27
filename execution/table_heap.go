@@ -54,6 +54,7 @@ func (tableHeap *TableHeap) InsertTuple(txn *transaction.TransactionContext, row
 		return common.RecordID{}, err
 	}
 
+	// Find space on existing heap pages 
 	for numPage := 0; numPage < numPages; numPage++ {
 		pageID := common.PageID{Oid: tableHeap.oid, PageNum: int32(numPage)}
 		frame, err := tableHeap.bufferPool.GetPage(pageID)
@@ -77,7 +78,7 @@ func (tableHeap *TableHeap) InsertTuple(txn *transaction.TransactionContext, row
 		tableHeap.bufferPool.UnpinPage(frame, false)
 	}
 
-	// allocate
+	// No space found on existing pages: allocate a new heap page.
 	numPage, err := file.AllocatePage(1)
 	if err != nil {
 		return common.RecordID{}, err
@@ -271,6 +272,8 @@ func (it *TableHeapIterator) Next() bool {
 	bp := it.tableHeap.bufferPool
 
 	for {
+		// fetch and pin the next heap page when we run out of slots
+		// on the current page (or at the very beginning of iteration).
 		if it.currFrame == nil {
 			if it.currPageNum >= it.numPages {
 				return false
@@ -291,6 +294,7 @@ func (it *TableHeapIterator) Next() bool {
 			it.currSlot = -1
 		}
 
+		// Scan slots on the current page
 		it.currFrame.PageLatch.RLock()
 		hp := it.currFrame.AsHeapPage()
 		numSlots := hp.NumSlots()
@@ -298,6 +302,7 @@ func (it *TableHeapIterator) Next() bool {
 		for {
 			it.currSlot++
 			if it.currSlot >= numSlots {
+				// Finished this page: release latch and unpin before advancing to the next page
 				it.currFrame.PageLatch.RUnlock()
 				bp.UnpinPage(it.currFrame, false)
 				it.currFrame = nil

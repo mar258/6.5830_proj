@@ -85,13 +85,14 @@ func (b *Bitmap) FindFirstZero(startHint int) int {
 	idx := -1
 	found := false
 
+	// start iterating from startHint
 	for i := wordIndex; i < len(b.words); i++ {
 		startBit := 0
 		if i == wordIndex {
 			startBit = bitIndex
 		}
 
-		endBit := 64
+		endBit := 64 // 64 bits per word
 		if i == len(b.words)-1 {
 			remaining := b.numBits - i*64
 			if remaining < endBit {
@@ -99,6 +100,7 @@ func (b *Bitmap) FindFirstZero(startHint int) int {
 			}
 		}
 
+		// iterate thru each bit in word
 		for j := startBit; j < endBit; j++ {
 			mask := uint64(1) << uint(j)
 			if (b.words[i] & mask) == 0 { 
@@ -112,9 +114,10 @@ func (b *Bitmap) FindFirstZero(startHint int) int {
 		}
 	}
 
+	// wrap around to start and end at startHint
 	if !found {
 		for i := 0; i <= wordIndex && i < len(b.words); i++ {
-			endBit := 64
+			endBit := 64 // 64 bits per word
 			if i == wordIndex {
 				endBit = bitIndex
 			}
@@ -126,6 +129,7 @@ func (b *Bitmap) FindFirstZero(startHint int) int {
 				}
 			}
 
+			// iterate thru each bit in word
 			for j := 0; j < endBit; j++ {
 				mask := uint64(1) << uint(j)
 				if (b.words[i] & mask) == 0 { 

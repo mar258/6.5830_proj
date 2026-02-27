@@ -42,7 +42,7 @@ func InitializeHeapPage(desc *RawTupleDesc, frame *PageFrame) {
 	// rowsize = bytesPerTuple
 	frame.Bytes[8] = byte(rowSize)
 	frame.Bytes[9] = byte(rowSize >> 8)
-	// numused
+	// num used
 	frame.Bytes[12] = 0
 	frame.Bytes[13] = 0
 
@@ -63,7 +63,7 @@ func InitializeHeapPage(desc *RawTupleDesc, frame *PageFrame) {
 
 	wordsBerBitmap := (numSlots + 63) / 64
 	bytesPerBitmap := wordsBerBitmap * 8
-
+	// set bitmaps to 0
 	for i := 0; i < 2*bytesPerBitmap; i++{
 		frame.Bytes[headerSize + i] = 0
 	}

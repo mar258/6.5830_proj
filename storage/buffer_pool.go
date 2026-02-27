@@ -31,6 +31,7 @@ type BufferPool struct {
 //
 // Hint: You will need to worry about logManager until Lab 3
 func NewBufferPool(numPages int, storageManager DBFileManager, logManager LogManager) *BufferPool {
+	// pre-allocate page frames
 	frames := make([]*PageFrame, numPages)
 	for i := 0; i < numPages; i++ {
 		frames[i] = &PageFrame{}
@@ -54,6 +55,7 @@ func (bp *BufferPool) StorageManager() DBFileManager {
 // present, the method must first make space by selecting a victim frame to evict
 // (potentially writing it to disk if dirty), and then read the requested page from disk into that frame.
 func (bp *BufferPool) GetPage(pageID common.PageID) (*PageFrame, error) {
+	// lock per pageID
 	var pageLock *sync.Mutex
 	if lock, ok := bp.pageLocks.Load(pageID); ok {
 		pageLock = lock
@@ -79,7 +81,6 @@ func (bp *BufferPool) GetPage(pageID common.PageID) (*PageFrame, error) {
 	}
 
 	// miss
-
 	for i := 0; i < 100; i++ {
 		idx := int((atomic.AddUint64(&bp.hand, 1) - 1)) % bp.numPages
 		frame = bp.frames[idx]
@@ -101,10 +102,13 @@ func (bp *BufferPool) GetPage(pageID common.PageID) (*PageFrame, error) {
 			frame.lock.Unlock()
 			continue
 		}
+
+		// eviction frame found
 		frame.setEvicting(true)
 
 		id := frame.getPageID()
 
+		// write victim to disk if dirty
 		if frame.getDirty() {
 			file, err := bp.StorageManager().GetDBFile(id.Oid)
 			if err != nil {
@@ -127,6 +131,7 @@ func (bp *BufferPool) GetPage(pageID common.PageID) (*PageFrame, error) {
 		}
 		bp.buffer_cache.Delete(id)
 
+		// read req data to freed frame
 		currFile, err := bp.StorageManager().GetDBFile(pageID.Oid)
 		if err != nil {
 			frame.lock.Lock()
@@ -144,6 +149,8 @@ func (bp *BufferPool) GetPage(pageID common.PageID) (*PageFrame, error) {
 			frame.lock.Unlock()
 			return nil, err
 		}
+
+		// set meta data
 		frame.setPins(1)
 		frame.setPageID(pageID)
 		frame.setRef(false)
@@ -171,6 +178,8 @@ func (bp *BufferPool) GetPage(pageID common.PageID) (*PageFrame, error) {
 	}
 
 	id := frame.getPageID()
+
+	// write victim to disk if dirty
 	if frame.getDirty() {
 		file, err := bp.StorageManager().GetDBFile(id.Oid)
 		if err != nil {
@@ -191,6 +200,8 @@ func (bp *BufferPool) GetPage(pageID common.PageID) (*PageFrame, error) {
 		frame.setDirty(false)
 	}
 	bp.buffer_cache.Delete(id)
+
+	// read req data to freed frame
 	currFile, err := bp.StorageManager().GetDBFile(pageID.Oid)
 	if err != nil {
 		frame.setEvicting(false)
@@ -208,6 +219,7 @@ func (bp *BufferPool) GetPage(pageID common.PageID) (*PageFrame, error) {
 		return nil, err
 	}
 
+	// set meta data
 	frame.setPins(1)
 	frame.setPageID(pageID)
 	bp.buffer_cache.Store(pageID, frame)

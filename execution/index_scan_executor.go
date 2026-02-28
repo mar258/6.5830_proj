@@ -10,7 +10,9 @@ import (
 // It iterates through the B+Tree (or other index type) starting from a specific key
 // and traversing in a specific direction (Forward or Backward).
 type IndexScanExecutor struct {
-	// Fill me in!
+	plan *planner.IndexScanNode
+	index indexing.Index
+	tableHeap *TableHeap
 }
 
 func NewIndexScanExecutor(plan *planner.IndexScanNode, index indexing.Index, tableHeap *TableHeap) *IndexScanExecutor {

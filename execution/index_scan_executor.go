@@ -4,41 +4,66 @@ import (
 	"mit.edu/dsg/godb/indexing"
 	"mit.edu/dsg/godb/planner"
 	"mit.edu/dsg/godb/storage"
+	"mit.edu/dsg/godb/transaction"
 )
 
 // IndexScanExecutor executes a range scan over an index.
 // It iterates through the B+Tree (or other index type) starting from a specific key
 // and traversing in a specific direction (Forward or Backward).
 type IndexScanExecutor struct {
-	plan *planner.IndexScanNode
-	index indexing.Index
+	plan      *planner.IndexScanNode
+	index     indexing.Index
 	tableHeap *TableHeap
+	iter      indexing.ScanIterator
+	readBuf   []byte
+	txn       *transaction.TransactionContext
+	err       error
 }
 
 func NewIndexScanExecutor(plan *planner.IndexScanNode, index indexing.Index, tableHeap *TableHeap) *IndexScanExecutor {
-	panic("unimplemented")
+	return &IndexScanExecutor{plan: plan, index: index, tableHeap: tableHeap}
 }
 
 func (e *IndexScanExecutor) PlanNode() planner.PlanNode {
-	panic("unimplemented")
+	return e.plan
 }
 
 func (e *IndexScanExecutor) Init(ctx *ExecutorContext) error {
-	panic("unimplemented")
+	var txn *transaction.TransactionContext
+	if ctx != nil {
+		txn = ctx.GetTransaction()
+	}
+	e.txn = txn
+	e.readBuf = make([]byte, e.tableHeap.StorageSchema().BytesPerTuple())
+	iter, err := e.index.Scan(e.plan.StartKey, e.plan.Direction, txn)
+	if err != nil {
+		return err
+	}
+	e.iter = iter
+	return nil
 }
 
 func (e *IndexScanExecutor) Next() bool {
-	panic("unimplemented")
+	return e.iter.Next()
 }
 
 func (e *IndexScanExecutor) Current() storage.Tuple {
-	panic("unimplemented")
+	rid := e.iter.Value()
+	desc := e.tableHeap.StorageSchema()
+	e.err = e.tableHeap.ReadTuple(e.txn, rid, e.readBuf, e.plan.ForUpdate)
+	if e.err != nil {
+		return storage.Tuple{}
+	}
+	return storage.FromRawTuple(storage.RawTuple(e.readBuf), desc, rid)
 }
 
 func (e *IndexScanExecutor) Close() error {
-	panic("unimplemented")
+	return e.iter.Close()
 }
 
 func (e *IndexScanExecutor) Error() error {
-	panic("unimplemented")
+	if e.err != nil {
+		return e.err
+	}
+	return e.iter.Error()
 }

@@ -22,6 +22,7 @@ func (e *LimitExecutor) PlanNode() planner.PlanNode {
 }
 
 func (e *LimitExecutor) Init(ctx *ExecutorContext) error {
+	e.currAmt = 0
 	return e.child.Init(ctx)
 }
 
@@ -29,7 +30,7 @@ func (e *LimitExecutor) Next() bool {
 	if e.currAmt >= e.limit{
 		return false
 	}
-	e.limit++
+	e.currAmt++
 	return e.child.Next()
 }
 

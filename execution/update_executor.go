@@ -4,6 +4,7 @@ import (
 	"mit.edu/dsg/godb/common"
 	"mit.edu/dsg/godb/indexing"
 	"mit.edu/dsg/godb/planner"
+	"mit.edu/dsg/godb/transaction"
 	"mit.edu/dsg/godb/storage"
 )
 
@@ -13,38 +14,124 @@ import (
 // The executor updates the table heap in-place and ensures that all relevant indexes are updated
 // if the key columns have changed. It produces a single tuple containing the count of updated rows.
 type UpdateExecutor struct {
-	// Fill me in!
+	plan *planner.UpdateNode
+	child Executor
+	tableHeap *TableHeap
+	indexes []indexing.Index
+	err error
+	updatedRows int64
+	done bool
+	txn *transaction.TransactionContext
 }
 
 func NewUpdateExecutor(plan *planner.UpdateNode, child Executor, tableHeap *TableHeap, indexes []indexing.Index) *UpdateExecutor {
-	panic("unimplemented")
+	return &UpdateExecutor{plan: plan, child: child, tableHeap: tableHeap, indexes: indexes}
 }
 
 func (e *UpdateExecutor) PlanNode() planner.PlanNode {
-	panic("unimplemented")
+	return e.plan
 
 }
 
 func (e *UpdateExecutor) Init(ctx *ExecutorContext) error {
-	panic("unimplemented")
+	if ctx != nil{
+		e.txn = ctx.GetTransaction()
+	}else{
+		e.txn = nil
+	}
+
+	return e.child.Init(ctx)
 }
 
 func (e *UpdateExecutor) Next() bool {
-	panic("unimplemented")
-}
+	if e.done || e.err != nil {
+		return false
+	}
 
+	desc := e.tableHeap.StorageSchema()
+
+	for e.child.Next() {
+		oldTup := e.child.Current()
+		rid := oldTup.RID()
+
+		// Build updated row in a physical buffer.
+		row := make([]byte, desc.BytesPerTuple())
+		for col := 0; col < len(e.plan.Expressions); col++ {
+			val := e.plan.Expressions[col].Eval(oldTup)
+			desc.SetValue(row, col, val)
+		}
+		newTup := storage.FromRawTuple(storage.RawTuple(row), desc, rid)
+
+		// Update indexes if any key column changed.
+		for _, idx := range e.indexes {
+			md := idx.Metadata()
+
+			// Collect old and new key values.
+			changed := false
+			oldVals := make([]common.Value, len(md.ProjectionList))
+			newVals := make([]common.Value, len(md.ProjectionList))
+			for i, colIdx := range md.ProjectionList {
+				oldVals[i] = oldTup.GetValue(colIdx)
+				newVals[i] = newTup.GetValue(colIdx)
+				if oldVals[i].Compare(newVals[i]) != 0 {
+					changed = true
+				}
+			}
+			if !changed {
+				continue
+			}
+
+			// Build old key.
+			oldKeyTup := storage.FromValues(oldVals...)
+			oldBuf := make([]byte, md.KeySchema.BytesPerTuple())
+			oldKeyTup.WriteToBuffer(oldBuf, md.KeySchema)
+			oldKey := md.AsKey(storage.RawTuple(oldBuf))
+
+			// Build new key.
+			newKeyTup := storage.FromValues(newVals...)
+			newBuf := make([]byte, md.KeySchema.BytesPerTuple())
+			newKeyTup.WriteToBuffer(newBuf, md.KeySchema)
+			newKey := md.AsKey(storage.RawTuple(newBuf))
+
+			if err := idx.DeleteEntry(oldKey, rid, e.txn); err != nil {
+				e.err = err
+				return false
+			}
+			if err := idx.InsertEntry(newKey, rid, e.txn); err != nil {
+				e.err = err
+				return false
+			}
+		}
+
+		// Update the heap tuple in-place.
+		if err := e.tableHeap.UpdateTuple(e.txn, rid, storage.RawTuple(row)); err != nil {
+			e.err = err
+			return false
+		}
+
+		e.updatedRows++
+	}
+
+	if childErr := e.child.Error(); childErr != nil {
+		e.err = childErr
+		return false
+	}
+
+	e.done = true
+	return true
+}
 func (e *UpdateExecutor) OutputSchema() []common.Type {
-	panic("unimplemented")
+	return e.plan.OutputSchema()
 }
 
 func (e *UpdateExecutor) Current() storage.Tuple {
-	panic("unimplemented")
+	return storage.FromValues(common.NewIntValue((e.updatedRows)))
 }
 
 func (e *UpdateExecutor) Close() error {
-	panic("unimplemented")
+	return e.child.Close()
 }
 
 func (e *UpdateExecutor) Error() error {
-	panic("unimplemented")
+	return e.err
 }

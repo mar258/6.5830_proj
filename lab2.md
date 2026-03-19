@@ -235,8 +235,8 @@ that the output tuple is the concatenation of the two input tuples from left to 
 Run `go test -v ./execution -run BNLJ`
 
 ### 2. Sort (`SortExecutor`)
-* **Logic:** `Init()` must consume **all** tuples from the child, store them in a buffer, and sort them according to the `OrderBy` expression.
-* **Execution:** `Next()` simply returns the next tuple from the sorted buffer.
+* **Execution:** The first call to `Next()` must consume **all** tuples from the child, store them in a buffer, and sort
+them according to the `OrderBy` expression. Subsequent calls simply returns the next tuple from the sorted buffer.
 * **Note:** This is a "blocking" operator; it produces no results until the child is exhausted.
   
 **Test:**
@@ -245,11 +245,11 @@ Run `go test -v ./execution -run BNLJ`
 ### 3. Aggregation (`AggregateExecutor`)
 * **Logic:** Implement grouped aggregation (e.g., `SELECT count(*), sum(a) FROM table GROUP BY b`).
 * **Strategy:** Use **Hash Aggregation**.
-    * In `Init()`, consume *all* tuples from the child.
+    * In the first call to `Next()`, consume *all* tuples from the child.
     * Maintain a Hash Map (you may use the one in `execution/hash_table.go`) where keys are the `GROUP BY` fields and
       values are the running aggregates (Sum, Count, Min, Max).
     * Update the aggregate state for every tuple.
-    * In `Next()`, iterate through the populated hash map and return the results.
+    * Subsequent calls to `Next()` iterate through the populated hash map and return the results.
 
 **Test:**
 Run `go test -v ./execution -run Aggregate`

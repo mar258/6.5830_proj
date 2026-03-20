@@ -34,13 +34,20 @@ func (e *UpdateExecutor) PlanNode() planner.PlanNode {
 }
 
 func (e *UpdateExecutor) Init(ctx *ExecutorContext) error {
+	e.err = nil
+	e.updatedRows = 0
+	e.done = false
 	if ctx != nil{
 		e.txn = ctx.GetTransaction()
 	}else{
 		e.txn = nil
 	}
 
-	return e.child.Init(ctx)
+	if err := e.child.Init(ctx); err != nil {
+		e.err = err
+		return err
+	}
+	return nil
 }
 
 func (e *UpdateExecutor) Next() bool {
@@ -133,5 +140,11 @@ func (e *UpdateExecutor) Close() error {
 }
 
 func (e *UpdateExecutor) Error() error {
-	return e.err
+	if e.err != nil {
+		return e.err
+	}
+	if err := e.child.Error(); err != nil {
+		return err
+	}
+	return nil
 }

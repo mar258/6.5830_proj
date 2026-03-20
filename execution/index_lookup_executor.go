@@ -31,16 +31,19 @@ func (e *IndexLookupExecutor) PlanNode() planner.PlanNode {
 }
 
 func (e *IndexLookupExecutor) Init(ctx *ExecutorContext) error {
+	e.err = nil
 	var txn *transaction.TransactionContext
 	if ctx != nil {
 		txn = ctx.GetTransaction()
 	}
 	e.txn = txn
 	e.readBuf = make([]byte, e.tableHeap.StorageSchema().BytesPerTuple())
+	e.rids = nil
 	e.idx = -1
 
 	rids, err := e.index.ScanKey(e.plan.EqualityKey, nil, txn)
 	if err != nil {
+		e.err = err
 		return err
 	}
 	e.rids = rids
@@ -48,6 +51,9 @@ func (e *IndexLookupExecutor) Init(ctx *ExecutorContext) error {
 }
 
 func (e *IndexLookupExecutor) Next() bool {
+	if e.err != nil {
+		return false
+	}
 	e.idx++
 	if e.idx >= len(e.rids) {
 		return false
@@ -56,6 +62,9 @@ func (e *IndexLookupExecutor) Next() bool {
 }
 
 func (e *IndexLookupExecutor) Current() storage.Tuple {
+	if e.err != nil || e.idx < 0 || e.idx >= len(e.rids) {
+		return storage.EmptyTuple
+	}
 	rid := e.rids[e.idx]
 	desc := e.tableHeap.StorageSchema()
 	e.err = e.tableHeap.ReadTuple(e.txn, rid, e.readBuf, e.plan.ForUpdate)

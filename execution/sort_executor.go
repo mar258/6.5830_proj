@@ -26,8 +26,13 @@ func (e *SortExecutor) PlanNode() planner.PlanNode {
 }
 
 func (e *SortExecutor) Init(ctx *ExecutorContext) error {
+	e.done = false
+	e.idx = -1
+	e.err = nil
+
 	err := e.child.Init(ctx)
 	if err != nil{
+		e.err = err
 		return err
 	}
 
@@ -36,6 +41,10 @@ func (e *SortExecutor) Init(ctx *ExecutorContext) error {
 	for e.child.Next(){
 		tup := e.child.Current()
 		e.buf = append(e.buf, tup.DeepCopy(tupleDesc))
+	}
+	if childErr := e.child.Error(); childErr != nil {
+		e.err = childErr
+		return childErr
 	}
 
 	orderBy := e.plan.OrderBy
@@ -61,8 +70,6 @@ func (e *SortExecutor) Init(ctx *ExecutorContext) error {
 		// Fully equal on all keys
 		return false
 	})
-	e.idx = -1
-
 	return nil
 }
 
@@ -86,7 +93,13 @@ func (e *SortExecutor) Current() storage.Tuple {
 }
 
 func (e *SortExecutor) Error() error {
-	return e.err
+	if e.err != nil {
+		return e.err
+	}
+	if err := e.child.Error(); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (e *SortExecutor) Close() error {

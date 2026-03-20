@@ -84,6 +84,10 @@ func (e *InsertExecutor) Next() bool {
 
 		count++
 	}
+	if childErr := e.child.Error(); childErr != nil {
+		e.err = childErr
+		return false
+	}
 
 	e.insertedCount = count
 	e.done = true
@@ -99,5 +103,11 @@ func (e *InsertExecutor) Close() error {
 }
 
 func (e *InsertExecutor) Error() error {
+	if e.err != nil {
+		return e.err
+	}
+	if err := e.child.Error(); err != nil {
+		return err
+	}
 	return e.err
 }

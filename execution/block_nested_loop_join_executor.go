@@ -163,15 +163,25 @@ func (e *BlockNestedLoopJoinExecutor) Current() storage.Tuple {
 }
 
 func (e *BlockNestedLoopJoinExecutor) Error() error {
-	return e.err
-}
-
-func (e *BlockNestedLoopJoinExecutor) Close() error {
-	if err := e.left.Close(); err != nil {
+	if e.err != nil {
+		return e.err
+	}
+	if err := e.left.Error(); err != nil {
 		return err
 	}
-	if err := e.right.Close(); err != nil {
+	if err := e.right.Error(); err != nil {
 		return err
 	}
 	return nil
+}
+
+func (e *BlockNestedLoopJoinExecutor) Close() error {
+	var firstErr error
+	if err := e.left.Close(); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	if err := e.right.Close(); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	return firstErr
 }

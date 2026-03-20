@@ -29,6 +29,7 @@ func (e *IndexScanExecutor) PlanNode() planner.PlanNode {
 }
 
 func (e *IndexScanExecutor) Init(ctx *ExecutorContext) error {
+	e.err = nil
 	var txn *transaction.TransactionContext
 	if ctx != nil {
 		txn = ctx.GetTransaction()
@@ -37,6 +38,7 @@ func (e *IndexScanExecutor) Init(ctx *ExecutorContext) error {
 	e.readBuf = make([]byte, e.tableHeap.StorageSchema().BytesPerTuple())
 	iter, err := e.index.Scan(e.plan.StartKey, e.plan.Direction, txn)
 	if err != nil {
+		e.err = err
 		return err
 	}
 	e.iter = iter
@@ -44,10 +46,16 @@ func (e *IndexScanExecutor) Init(ctx *ExecutorContext) error {
 }
 
 func (e *IndexScanExecutor) Next() bool {
+	if e.err != nil || e.iter == nil {
+		return false
+	}
 	return e.iter.Next()
 }
 
 func (e *IndexScanExecutor) Current() storage.Tuple {
+	if e.err != nil || e.iter == nil {
+		return storage.EmptyTuple
+	}
 	rid := e.iter.Value()
 	desc := e.tableHeap.StorageSchema()
 	e.err = e.tableHeap.ReadTuple(e.txn, rid, e.readBuf, e.plan.ForUpdate)
@@ -58,12 +66,18 @@ func (e *IndexScanExecutor) Current() storage.Tuple {
 }
 
 func (e *IndexScanExecutor) Close() error {
+	if e.iter == nil {
+		return nil
+	}
 	return e.iter.Close()
 }
 
 func (e *IndexScanExecutor) Error() error {
 	if e.err != nil {
 		return e.err
+	}
+	if e.iter == nil {
+		return nil
 	}
 	return e.iter.Error()
 }

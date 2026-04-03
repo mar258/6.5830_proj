@@ -237,7 +237,7 @@ Congratulations — you have built a complete database system from scratch!
 ### 1. Submission
 
 ```bash
-zip -r lab4_submission.zip godb/
+zip -r lab4_submission.zip . -x "*.git*"
 ```
 
 Upload this zip file to Gradescope. We reserve the right to re-execute tests after the deadline, as concurrency

@@ -18,37 +18,63 @@ type logRecordBuffer struct {
 
 // newLogRecordBuffer creates a stack with some pre-allocated capacity.
 func newLogRecordBuffer() *logRecordBuffer {
-	panic("unimplemented")
+	return &logRecordBuffer{buffer:  make([]byte, 0, 4096), offsets: make([]int, 0, 64),}
 }
 
 // allocate reserves `totalSize` bytes in the buffer for a new record.
 // It returns a slice referencing the allocated space.
 // It also records the offset of this new record, effectively pushing it onto the stack.
 func (s *logRecordBuffer) allocate(totalSize int) []byte {
-	panic("unimplemented")
+	start := len(s.buffer)
+	end := start + totalSize
+
+	if end > cap(s.buffer){
+		newCap := cap(s.buffer)
+		if newCap == 0{
+			newCap = 256
+		}
+		for end > newCap{
+			newCap *= 2
+		}
+		new_buffer := make([]byte, len(s.buffer), newCap)
+		copy(new_buffer, s.buffer)
+		s.buffer = new_buffer
+	}
+
+	s.offsets = append(s.offsets, start)
+	s.buffer = s.buffer[:end]
+	return s.buffer[start:end]
 }
 
 // len returns the number of records currently stored in the buffer.
 func (s *logRecordBuffer) len() int {
-	panic("unimplemented")
+	return len(s.offsets)
 }
 
 // get returns the LogRecord at the specified index `i`.
 // The index `i` corresponds to the order of insertion (0 is the first record).
 func (s *logRecordBuffer) get(i int) storage.LogRecord {
-	panic("unimplemented")
+	start := s.offsets[i]
+	end:= len(s.buffer)
+	if i+1 < len(s.offsets){
+		end = s.offsets[i+1]
+	}
+	return storage.AsLogRecord(s.buffer[start:end])
 }
 
 // pop removes the most recently added record from the buffer.
 // This effectively rewinds the stack by one record.
 func (s *logRecordBuffer) pop() {
-	panic("unimplemented")
+	start := s.offsets[len(s.offsets)-1]
+	s.buffer = s.buffer[:start]
+	s.offsets = s.offsets[:len(s.offsets)-1]
 }
 
 // reset clears the buffer (sets length to 0) without releasing the underlying memory.
 // This is used when reusing the TransactionContext.
 func (s *logRecordBuffer) reset() {
-	panic("unimplemented")
+	s.buffer = make([]byte, 0, 4096)
+	s.offsets = make([]int, 0, 64)
 }
 
 // TransactionContext holds the runtime state of a single transaction.

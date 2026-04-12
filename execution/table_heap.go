@@ -44,6 +44,14 @@ func (tableHeap *TableHeap) StorageSchema() *storage.RawTupleDesc {
 
 // InsertTuple inserts a tuple into the TableHeap. It should find a free space, allocating if needed, and return the found slot.
 func (tableHeap *TableHeap) InsertTuple(txn *transaction.TransactionContext, row storage.RawTuple) (common.RecordID, error) {
+	tableTag := transaction.NewTableLockTag(tableHeap.oid)
+	if txn != nil{
+		err := txn.AcquireLock(tableTag, transaction.LockModeIX)
+		if err != nil{
+			return common.RecordID{}, err
+		}
+	}
+
 	storageManager := tableHeap.bufferPool.StorageManager()
 	file, err := storageManager.GetDBFile(tableHeap.oid)
 	if err != nil {
@@ -55,8 +63,8 @@ func (tableHeap *TableHeap) InsertTuple(txn *transaction.TransactionContext, row
 	}
 
 	// Find space on existing heap pages 
-	for numPage := 0; numPage < numPages; numPage++ {
-		pageID := common.PageID{Oid: tableHeap.oid, PageNum: int32(numPage)}
+	for numPage := 0; numPage < numPages; numPage++ {	
+		pageID := common.PageID{Oid: tableHeap.oid, PageNum: int32(numPage)}	
 		frame, err := tableHeap.bufferPool.GetPage(pageID)
 		if err != nil {
 			continue
@@ -66,7 +74,21 @@ func (tableHeap *TableHeap) InsertTuple(txn *transaction.TransactionContext, row
 		heapPage := frame.AsHeapPage()
 		freeSlot := heapPage.FindFreeSlot()
 		if freeSlot != -1 {
-			rid := common.RecordID{PageID: pageID, Slot: int32(freeSlot)}
+			rid := common.RecordID{PageID: pageID, Slot: int32(freeSlot)}		
+			tupleTag := transaction.NewTupleLockTag(rid)
+
+			if txn != nil{
+				err = txn.AcquireLock(tupleTag, transaction.LockModeX)
+				if err != nil{
+					return common.RecordID{}, err
+				}	
+				rec := txn.NewInsertRecord(rid, row)
+				lsn, err := tableHeap.logManager.Append(rec)
+				if err != nil {
+					return common.RecordID{}, err
+				}
+				frame.MonotonicallyUpdateLSN(lsn)	
+			}
 			tuple := heapPage.AccessTuple(rid)
 			copy(tuple, row)
 			heapPage.MarkAllocated(rid, true)
@@ -100,6 +122,21 @@ func (tableHeap *TableHeap) InsertTuple(txn *transaction.TransactionContext, row
 	}
 
 	rid := common.RecordID{PageID: pageID, Slot: int32(freeSlot)}
+	tupleTag := transaction.NewTupleLockTag(rid)
+
+	if txn != nil{
+		err = txn.AcquireLock(tupleTag, transaction.LockModeX)
+		if err != nil{
+			return common.RecordID{}, err
+		}	
+		rec := txn.NewInsertRecord(rid, row)
+		lsn, err := tableHeap.logManager.Append(rec)
+		if err != nil {
+			return common.RecordID{}, err
+		}
+		frame.MonotonicallyUpdateLSN(lsn)	
+	}
+
 	tuple := heapPage.AccessTuple(rid)
 	copy(tuple, row)
 	heapPage.MarkAllocated(rid, true)
@@ -114,6 +151,20 @@ var ErrTupleDeleted = errors.New("tuple has been deleted")
 
 // DeleteTuple marks a tuple as deleted in the TableHeap. If the tuple has been deleted, return ErrTupleDeleted
 func (tableHeap *TableHeap) DeleteTuple(txn *transaction.TransactionContext, rid common.RecordID) error {
+	tableTag := transaction.NewTableLockTag(tableHeap.oid)
+	tupleTag := transaction.NewTupleLockTag(rid)
+
+	if txn != nil{
+		err := txn.AcquireLock(tupleTag, transaction.LockModeX)
+		if err != nil{
+			return err
+		}
+		err = txn.AcquireLock(tableTag, transaction.LockModeIX)
+		if err != nil{
+			return err
+		}
+	}
+
 	frame, err := tableHeap.bufferPool.GetPage(rid.PageID)
 	if err != nil{
 		return err
@@ -133,6 +184,14 @@ func (tableHeap *TableHeap) DeleteTuple(txn *transaction.TransactionContext, rid
 		return ErrTupleDeleted
 	}
 
+	if txn != nil{
+		rec := txn.NewDeleteRecord(rid)
+		lsn, err := tableHeap.logManager.Append(rec)
+		if err != nil {
+			return err
+		}
+		frame.MonotonicallyUpdateLSN(lsn)
+	}
 	page.MarkDeleted(rid, true)
 	return nil
 }
@@ -140,6 +199,31 @@ func (tableHeap *TableHeap) DeleteTuple(txn *transaction.TransactionContext, rid
 // ReadTuple reads the physical bytes of a tuple into the provided buffer. If forUpdate is true, read should acquire
 // exclusive lock instead of shared. If the tuple has been deleted, return ErrTupleDeleted
 func (tableHeap *TableHeap) ReadTuple(txn *transaction.TransactionContext, rid common.RecordID, buffer []byte, forUpdate bool) error {
+	tupleTag := transaction.NewTupleLockTag(rid)
+	tableTag := transaction.NewTableLockTag(tableHeap.oid)
+	if forUpdate{
+		err := txn.AcquireLock(tupleTag, transaction.LockModeX)
+		if err != nil{
+			return  err
+		}
+		err = txn.AcquireLock(tableTag, transaction.LockModeIX)
+		if err != nil{
+			return  err
+		}
+
+	
+	}else{
+		err := txn.AcquireLock(tupleTag, transaction.LockModeS)
+		if err != nil{
+			return err
+		}
+		err = txn.AcquireLock(tableTag, transaction.LockModeIS)
+		if err != nil{
+			return  err
+		}
+
+	}
+
 	frame, err := tableHeap.bufferPool.GetPage(rid.PageID)
 	if err != nil {
 		return err
@@ -169,6 +253,18 @@ func (tableHeap *TableHeap) ReadTuple(txn *transaction.TransactionContext, rid c
 
 // UpdateTuple updates a tuple in-place with new binary data. If the tuple has been deleted, return ErrTupleDeleted.
 func (tableHeap *TableHeap) UpdateTuple(txn *transaction.TransactionContext, rid common.RecordID, updatedTuple storage.RawTuple) error {
+	tupleTag := transaction.NewTupleLockTag(rid)
+	tableTag := transaction.NewTableLockTag(tableHeap.oid)
+	err := txn.AcquireLock(tupleTag, transaction.LockModeX)
+	if err != nil{
+		return err
+	}
+	err = txn.AcquireLock(tableTag, transaction.LockModeIX)
+	if err != nil{
+		return err
+	}
+
+
 	frame, err := tableHeap.bufferPool.GetPage(rid.PageID)
 	if err != nil {
 		return err
@@ -188,7 +284,19 @@ func (tableHeap *TableHeap) UpdateTuple(txn *transaction.TransactionContext, rid
 		return ErrTupleDeleted
 	}
 	dest := hp.AccessTuple(rid)
+
+	if txn != nil{
+		rec := txn.NewUpdateRecord(rid, dest, updatedTuple)
+		lsn, err := tableHeap.logManager.Append(rec)
+		if err != nil {
+			return err
+		}
+		frame.MonotonicallyUpdateLSN(lsn)
+
+	}
+
 	copy(dest, updatedTuple)
+
 	return nil
 }
 
@@ -210,6 +318,11 @@ func (tableHeap *TableHeap) VacuumPage(pageID common.PageID) error {
 		rid := common.RecordID{PageID: pageID, Slot: int32(i)}
 
 		if hp.IsAllocated(rid) && hp.IsDeleted(rid){
+			tupleTag := transaction.NewTupleLockTag(rid)
+			held :=  tableHeap.lockManager.LockHeld(tupleTag)
+			if held{
+				continue
+			}
 			hp.MarkAllocated(rid, false)
 		}
 
@@ -221,6 +334,13 @@ func (tableHeap *TableHeap) VacuumPage(pageID common.PageID) error {
 // Iterator creates a new TableHeapIterator to scan the table. It acquires the supplied lock on the table (S, X, or SIX),
 // and uses the supplied byte slice to fetch tuples in the returned iterator (for zero-allocation scanning).
 func (tableHeap *TableHeap) Iterator(txn *transaction.TransactionContext, mode transaction.DBLockMode, buffer []byte) (TableHeapIterator, error) {
+	if txn != nil{
+		tableTag := transaction.NewTableLockTag(tableHeap.oid)
+		err := txn.AcquireLock(tableTag, mode)
+		if err != nil{
+			return TableHeapIterator{}, err
+		}	
+	}
 	dbFile, err := tableHeap.bufferPool.StorageManager().GetDBFile(tableHeap.oid)
 	if err != nil {
 		return TableHeapIterator{}, err

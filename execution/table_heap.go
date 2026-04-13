@@ -155,11 +155,11 @@ func (tableHeap *TableHeap) DeleteTuple(txn *transaction.TransactionContext, rid
 	tupleTag := transaction.NewTupleLockTag(rid)
 
 	if txn != nil{
-		err := txn.AcquireLock(tupleTag, transaction.LockModeX)
+		err := txn.AcquireLock(tableTag, transaction.LockModeIX)
 		if err != nil{
 			return err
 		}
-		err = txn.AcquireLock(tableTag, transaction.LockModeIX)
+		err = txn.AcquireLock(tupleTag, transaction.LockModeX)
 		if err != nil{
 			return err
 		}
@@ -199,29 +199,29 @@ func (tableHeap *TableHeap) DeleteTuple(txn *transaction.TransactionContext, rid
 // ReadTuple reads the physical bytes of a tuple into the provided buffer. If forUpdate is true, read should acquire
 // exclusive lock instead of shared. If the tuple has been deleted, return ErrTupleDeleted
 func (tableHeap *TableHeap) ReadTuple(txn *transaction.TransactionContext, rid common.RecordID, buffer []byte, forUpdate bool) error {
-	tupleTag := transaction.NewTupleLockTag(rid)
-	tableTag := transaction.NewTableLockTag(tableHeap.oid)
-	if forUpdate{
-		err := txn.AcquireLock(tupleTag, transaction.LockModeX)
-		if err != nil{
-			return  err
-		}
-		err = txn.AcquireLock(tableTag, transaction.LockModeIX)
-		if err != nil{
-			return  err
-		}
+	if txn != nil{
+		tupleTag := transaction.NewTupleLockTag(rid)
+		tableTag := transaction.NewTableLockTag(tableHeap.oid)
+		if forUpdate{
+			err := txn.AcquireLock(tableTag, transaction.LockModeIX)
+			if err != nil{
+				return  err
+			}
 
-	
-	}else{
-		err := txn.AcquireLock(tupleTag, transaction.LockModeS)
-		if err != nil{
-			return err
-		}
-		err = txn.AcquireLock(tableTag, transaction.LockModeIS)
-		if err != nil{
-			return  err
-		}
-
+			err = txn.AcquireLock(tupleTag, transaction.LockModeX)
+			if err != nil{
+				return  err
+			}	
+		}else{
+			err := txn.AcquireLock(tableTag, transaction.LockModeIS)
+			if err != nil{
+				return  err
+			}
+			err = txn.AcquireLock(tupleTag, transaction.LockModeS)
+			if err != nil{
+				return err
+			}
+		}	
 	}
 
 	frame, err := tableHeap.bufferPool.GetPage(rid.PageID)
@@ -253,17 +253,18 @@ func (tableHeap *TableHeap) ReadTuple(txn *transaction.TransactionContext, rid c
 
 // UpdateTuple updates a tuple in-place with new binary data. If the tuple has been deleted, return ErrTupleDeleted.
 func (tableHeap *TableHeap) UpdateTuple(txn *transaction.TransactionContext, rid common.RecordID, updatedTuple storage.RawTuple) error {
-	tupleTag := transaction.NewTupleLockTag(rid)
-	tableTag := transaction.NewTableLockTag(tableHeap.oid)
-	err := txn.AcquireLock(tupleTag, transaction.LockModeX)
-	if err != nil{
-		return err
+	if txn != nil{
+		tupleTag := transaction.NewTupleLockTag(rid)
+		tableTag := transaction.NewTableLockTag(tableHeap.oid)
+		err := txn.AcquireLock(tableTag, transaction.LockModeIX)
+		if err != nil{
+			return err
+		}
+		err = txn.AcquireLock(tupleTag, transaction.LockModeX)
+		if err != nil{
+			return err
+		}	
 	}
-	err = txn.AcquireLock(tableTag, transaction.LockModeIX)
-	if err != nil{
-		return err
-	}
-
 
 	frame, err := tableHeap.bufferPool.GetPage(rid.PageID)
 	if err != nil {

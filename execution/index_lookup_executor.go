@@ -50,15 +50,62 @@ func (e *IndexLookupExecutor) Init(ctx *ExecutorContext) error {
 	return nil
 }
 
+
 func (e *IndexLookupExecutor) Next() bool {
 	if e.err != nil {
 		return false
 	}
-	e.idx++
-	if e.idx >= len(e.rids) {
-		return false
+	md := e.index.Metadata()
+	tableDesc := e.tableHeap.StorageSchema()
+
+	for{
+		e.idx++
+		if e.idx >= len(e.rids) {
+			return false
+		}
+		rid := e.rids[e.idx]
+	
+		if e.txn != nil {
+			tableTag := transaction.NewTableLockTag(e.tableHeap.oid)
+			tupleTag := transaction.NewTupleLockTag(rid)
+			if e.plan.ForUpdate {
+				if err := e.txn.AcquireLock(tableTag, transaction.LockModeIX); err != nil {
+					e.err = err
+					return false
+				}
+				if err := e.txn.AcquireLock(tupleTag, transaction.LockModeX); err != nil {
+					e.err = err
+					return false
+				}
+			} else {
+				if err := e.txn.AcquireLock(tableTag, transaction.LockModeIS); err != nil {
+					e.err = err
+					return false
+				}
+				if err := e.txn.AcquireLock(tupleTag, transaction.LockModeS); err != nil {
+					e.err = err
+					return false
+				}
+			}
+		}
+	
+		e.err = e.tableHeap.ReadTuple(nil, rid, e.readBuf, e.plan.ForUpdate)
+		if e.err != nil {
+			//stale read
+			if e.err == ErrTupleDeleted{
+				continue
+			}
+			return false
+		}
+
+		// check for key mismatch
+		rowKey := keyFromRow(md, tableDesc, e.readBuf)
+		if !e.plan.EqualityKey.Equals(rowKey) {
+			continue
+		}
+		
+		return true
 	}
-	return true
 }
 
 func (e *IndexLookupExecutor) Current() storage.Tuple {
@@ -67,10 +114,7 @@ func (e *IndexLookupExecutor) Current() storage.Tuple {
 	}
 	rid := e.rids[e.idx]
 	desc := e.tableHeap.StorageSchema()
-	e.err = e.tableHeap.ReadTuple(e.txn, rid, e.readBuf, e.plan.ForUpdate)
-	if e.err != nil {
-		return storage.Tuple{}
-	}
+
 	return storage.FromRawTuple(storage.RawTuple(e.readBuf), desc, rid)
 }
 

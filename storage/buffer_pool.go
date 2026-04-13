@@ -24,6 +24,7 @@ type BufferPool struct {
 	hand           uint64
 	pageLocks      *xsync.MapOf[common.PageID, *sync.Mutex]
 	evictLock      sync.Mutex
+	logManager		LogManager
 }
 
 // NewBufferPool creates a new BufferPool with a fixed capacity defined by numPages. It requires a
@@ -42,6 +43,7 @@ func NewBufferPool(numPages int, storageManager DBFileManager, logManager LogMan
 		buffer_cache:   xsync.NewMapOf[common.PageID, *PageFrame](),
 		frames:         frames,
 		pageLocks:      xsync.NewMapOf[common.PageID, *sync.Mutex](),
+		logManager:		logManager,
 	}
 }
 
@@ -110,6 +112,12 @@ func (bp *BufferPool) GetPage(pageID common.PageID) (*PageFrame, error) {
 
 		// write victim to disk if dirty
 		if frame.getDirty() {
+			if bp.logManager != nil {
+				if err := bp.logManager.WaitUntilFlushed(frame.LSN()); err != nil {
+					return nil, err
+				}
+			}
+
 			file, err := bp.StorageManager().GetDBFile(id.Oid)
 			if err != nil {
 				frame.setEvicting(false)

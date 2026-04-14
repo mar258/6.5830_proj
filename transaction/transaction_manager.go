@@ -33,21 +33,45 @@ type TransactionManager struct {
 
 // NewTransactionManager initializes the transaction manager.
 func NewTransactionManager(logManager storage.LogManager, bufferPool *storage.BufferPool, lockManager *LockManager) *TransactionManager {
-	panic("unimplemented")
+	return &TransactionManager{
+		activeTxns:   xsync.NewMapOf[common.TransactionID, activeTxnEntry](),
+		logManager:   logManager,
+		bufferPool:   bufferPool,
+		lockManager:  lockManager,
+	}
 }
 
 // Begin starts a new transaction and returns the initialized context.
 func (tm *TransactionManager) Begin() (*TransactionContext, error) {
-	return nil, nil
+	tid := common.TransactionID(tm.nextTxnID.Add(1))
+	txn := NewTestTransactionContext(tm.lockManager, tid)
+
+	lsn, err := tm.logManager.Append(txn.NewBeginTransactionRecord())
+	if err != nil{
+		return txn, err
+	}
+	tm.activeTxns.Store(tid, activeTxnEntry{txn: txn, startLsn: lsn})
+	
+	return txn, nil
 }
 
 // Commit completes a transaction and makes its effects durable and visible.
 func (tm *TransactionManager) Commit(txn *TransactionContext) error {
+	lsn, err := tm.logManager.Append(txn.NewCommitRecord())
+	if err != nil{
+		return err
+	}
+	err = tm.logManager.WaitUntilFlushed(lsn)
+	if err != nil{
+		return err
+	}
 
 	// Execute In-Memory changes (Indexes) after flushed. Think about how this should interleave with the commit logic.
 	for _, task := range txn.commitActions {
 		task.Target.Invoke(task.Type, task.Key, task.RID)
 	}
+
+	txn.ReleaseAllLocks()
 	return nil
 }
 
@@ -61,6 +85,60 @@ func (tm *TransactionManager) Abort(txn *TransactionContext) error {
 	}
 
 	// Add your implementation here
+	for i := txn.logRecords.len() -1; i > 0; i--{
+		rec := txn.logRecords.get(i)
+		if rec.RecordType() == storage.LogInsert{
+			lsn, err := tm.logManager.Append(txn.NewInsertCLR(rec))
+			if err != nil{
+				return err
+			}
+			pageId:= rec.RID().PageID
+			frame, err := tm.bufferPool.GetPage(pageId)
+			defer tm.bufferPool.UnpinPage(frame, true)
+			frame.PageLatch.Lock()
+			hp := frame.AsHeapPage()
+			hp.MarkDeleted(rec.RID(), true)
+			frame.MonotonicallyUpdateLSN(lsn)
+			frame.PageLatch.Unlock()
+
+		}else if rec.RecordType() == storage.LogDelete{
+			lsn, err := tm.logManager.Append(txn.NewDeleteCLR(rec))
+			if err != nil{
+				return err
+			}
+			pageId:= rec.RID().PageID
+			frame, err := tm.bufferPool.GetPage(pageId)
+			defer tm.bufferPool.UnpinPage(frame, true)
+			frame.PageLatch.Lock()
+			hp := frame.AsHeapPage()
+			hp.MarkDeleted(rec.RID(), false)
+			frame.MonotonicallyUpdateLSN(lsn)
+			frame.PageLatch.Unlock()
+
+		}else if rec.RecordType() == storage.LogUpdate{
+			lsn, err := tm.logManager.Append(txn.NewUpdateCLR(rec))
+			if err != nil{
+				return err
+			}
+
+			pageId:= rec.RID().PageID
+			frame, err := tm.bufferPool.GetPage(pageId)
+			defer tm.bufferPool.UnpinPage(frame, true)
+			frame.PageLatch.Lock()
+			hp := frame.AsHeapPage()
+			copy(hp.AccessTuple(rec.RID()), rec.BeforeImage())
+			frame.MonotonicallyUpdateLSN(lsn)
+			frame.PageLatch.Unlock()
+		}
+	}
+
+	_, err := tm.logManager.Append(txn.NewAbortRecord())
+	if err != nil{
+		return err
+	}
+	
+	txn.ReleaseAllLocks()
+ 
 	return nil
 }
 

@@ -162,7 +162,7 @@ func (lm *LockManager) Lock(tid common.TransactionID, tag DBLockTag, mode DBLock
 		}
 
 		if shouldAbortWait(tid, mode, res.holders, res.waitQueue) {
-			return common.GoDBError{Code: common.DeadlockError, ErrString: "deadlock"}
+			return common.GoDBError{Code: common.DeadlockError}
 		}
 	
 		req := LockRequest{TID: tid, Tag: tag, Mode:mode}
@@ -185,7 +185,7 @@ func (lm *LockManager) Lock(tid common.TransactionID, tag DBLockTag, mode DBLock
 	}
 
 	if shouldAbortWait(tid, mode, res.holders, res.waitQueue) {
-		return common.GoDBError{Code: common.DeadlockError, ErrString: "deadlock"}
+		return common.GoDBError{Code: common.DeadlockError}
 	}
 
 	req := LockRequest{TID: tid, Tag: tag, Mode:mode}

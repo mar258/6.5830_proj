@@ -95,6 +95,7 @@ func (e *IndexScanExecutor) Next() bool {
 		if e.err != nil {
 			//stale read
 			if e.err == ErrTupleDeleted{
+				e.err = nil
 				continue
 			}
 			return false
@@ -103,6 +104,7 @@ func (e *IndexScanExecutor) Next() bool {
 		// check for key mismatch
 		rowKey := keyFromRow(md, tableDesc, e.readBuf)
 		if !e.iter.Key().Equals(rowKey) {
+			e.err = nil
 			continue
 		}
 		  

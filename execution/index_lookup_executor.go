@@ -93,6 +93,7 @@ func (e *IndexLookupExecutor) Next() bool {
 		if e.err != nil {
 			//stale read
 			if e.err == ErrTupleDeleted{
+				e.err = nil
 				continue
 			}
 			return false
@@ -101,9 +102,11 @@ func (e *IndexLookupExecutor) Next() bool {
 		// check for key mismatch
 		rowKey := keyFromRow(md, tableDesc, e.readBuf)
 		if !e.plan.EqualityKey.Equals(rowKey) {
+			e.err = nil
 			continue
 		}
 		
+		e.err = nil
 		return true
 	}
 }

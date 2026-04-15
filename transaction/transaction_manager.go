@@ -34,24 +34,66 @@ type TransactionManager struct {
 // NewTransactionManager initializes the transaction manager.
 func NewTransactionManager(logManager storage.LogManager, bufferPool *storage.BufferPool, lockManager *LockManager) *TransactionManager {
 	return &TransactionManager{
-		activeTxns:   xsync.NewMapOf[common.TransactionID, activeTxnEntry](),
-		logManager:   logManager,
-		bufferPool:   bufferPool,
-		lockManager:  lockManager,
+		activeTxns:  xsync.NewMapOf[common.TransactionID, activeTxnEntry](),
+		logManager:  logManager,
+		bufferPool:  bufferPool,
+		lockManager: lockManager,
+		txnPool: sync.Pool{
+			New: func() any {
+				return &TransactionContext{
+					logRecords: newLogRecordBuffer(),
+					heldLocks:  make(map[DBLockTag]DBLockMode),
+				}
+			},
+		},
 	}
+}
+
+func (tm *TransactionManager) getTxnFromPool() *TransactionContext {
+	if v := tm.txnPool.Get(); v != nil {
+		return v.(*TransactionContext)
+	}
+	return &TransactionContext{
+		logRecords: newLogRecordBuffer(),
+		heldLocks:  make(map[DBLockTag]DBLockMode),
+	}
+}
+
+// putTxnToPool clears pooled state and returns the context to the pool.
+// Call only after the transaction is fully finished (no longer in activeTxns).
+func (tm *TransactionManager) putTxnToPool(txn *TransactionContext) {
+	if txn == nil {
+		return
+	}
+	tm.activeTxns.Delete(txn.ID())
+	txn.id = 0
+	txn.lm = nil
+	txn.logRecords.reset()
+	txn.heldLocks = make(map[DBLockTag]DBLockMode)
+	txn.abortActions = txn.abortActions[:0]
+	txn.commitActions = txn.commitActions[:0]
+	tm.txnPool.Put(txn)
 }
 
 // Begin starts a new transaction and returns the initialized context.
 func (tm *TransactionManager) Begin() (*TransactionContext, error) {
 	tid := common.TransactionID(tm.nextTxnID.Add(1))
-	txn := NewTestTransactionContext(tm.lockManager, tid)
+	txn := tm.getTxnFromPool()
+	txn.id = tid
+	txn.lm = tm.lockManager
+	txn.logRecords.reset()
+	txn.heldLocks = make(map[DBLockTag]DBLockMode)
+	txn.abortActions = txn.abortActions[:0]
+	txn.commitActions = txn.commitActions[:0]
 
 	lsn, err := tm.logManager.Append(txn.NewBeginTransactionRecord())
-	if err != nil{
-		return txn, err
+	if err != nil {
+		txn.logRecords.reset()
+		tm.txnPool.Put(txn)
+		return nil, err
 	}
 	tm.activeTxns.Store(tid, activeTxnEntry{txn: txn, startLsn: lsn})
-	
+
 	return txn, nil
 }
 
@@ -72,6 +114,7 @@ func (tm *TransactionManager) Commit(txn *TransactionContext) error {
 	}
 
 	txn.ReleaseAllLocks()
+	tm.putTxnToPool(txn)
 	return nil
 }
 
@@ -138,7 +181,8 @@ func (tm *TransactionManager) Abort(txn *TransactionContext) error {
 	}
 	
 	txn.ReleaseAllLocks()
- 
+	tm.putTxnToPool(txn)
+
 	return nil
 }
 

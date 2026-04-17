@@ -41,6 +41,7 @@ func NewTransactionManager(logManager storage.LogManager, bufferPool *storage.Bu
 		txnPool: sync.Pool{
 			New: func() any {
 				return &TransactionContext{
+					lm: lockManager,
 					logRecords: newLogRecordBuffer(),
 					heldLocks:  make(map[DBLockTag]DBLockMode),
 				}
@@ -65,24 +66,22 @@ func (tm *TransactionManager) putTxnToPool(txn *TransactionContext) {
 	if txn == nil {
 		return
 	}
-	tm.activeTxns.Delete(txn.ID())
-	txn.id = 0
-	txn.lm = nil
-	txn.logRecords.reset()
-	txn.heldLocks = make(map[DBLockTag]DBLockMode)
-	txn.abortActions = txn.abortActions[:0]
-	txn.commitActions = txn.commitActions[:0]
+	// tm.activeTxns.Delete(txn.ID())
+	// txn.id = 0
+	// txn.lm = nil
+	// txn.logRecords.reset()
+	// txn.heldLocks = make(map[DBLockTag]DBLockMode)
+	// txn.abortActions = txn.abortActions[:0]
+	// txn.commitActions = txn.commitActions[:0]
 	tm.txnPool.Put(txn)
 }
 
 // Begin starts a new transaction and returns the initialized context.
 func (tm *TransactionManager) Begin() (*TransactionContext, error) {
 	tid := common.TransactionID(tm.nextTxnID.Add(1))
-	txn := tm.getTxnFromPool()
+	txn := tm.txnPool.Get().(*TransactionContext)
 	txn.id = tid
-	txn.lm = tm.lockManager
-	txn.logRecords.reset()
-	txn.heldLocks = make(map[DBLockTag]DBLockMode)
+	clear(txn.heldLocks)
 	txn.abortActions = txn.abortActions[:0]
 	txn.commitActions = txn.commitActions[:0]
 
@@ -114,6 +113,8 @@ func (tm *TransactionManager) Commit(txn *TransactionContext) error {
 	}
 
 	txn.ReleaseAllLocks()
+	tm.activeTxns.Delete(txn.id)
+	txn.Reset(txn.id)
 	tm.putTxnToPool(txn)
 	return nil
 }
@@ -137,12 +138,12 @@ func (tm *TransactionManager) Abort(txn *TransactionContext) error {
 			}
 			pageId:= rec.RID().PageID
 			frame, err := tm.bufferPool.GetPage(pageId)
-			defer tm.bufferPool.UnpinPage(frame, true)
 			frame.PageLatch.Lock()
 			hp := frame.AsHeapPage()
 			hp.MarkDeleted(rec.RID(), true)
 			frame.MonotonicallyUpdateLSN(lsn)
 			frame.PageLatch.Unlock()
+			tm.bufferPool.UnpinPage(frame, true)
 
 		}else if rec.RecordType() == storage.LogDelete{
 			lsn, err := tm.logManager.Append(txn.NewDeleteCLR(rec))
@@ -151,12 +152,12 @@ func (tm *TransactionManager) Abort(txn *TransactionContext) error {
 			}
 			pageId:= rec.RID().PageID
 			frame, err := tm.bufferPool.GetPage(pageId)
-			defer tm.bufferPool.UnpinPage(frame, true)
 			frame.PageLatch.Lock()
 			hp := frame.AsHeapPage()
 			hp.MarkDeleted(rec.RID(), false)
 			frame.MonotonicallyUpdateLSN(lsn)
 			frame.PageLatch.Unlock()
+			tm.bufferPool.UnpinPage(frame, true)
 
 		}else if rec.RecordType() == storage.LogUpdate{
 			lsn, err := tm.logManager.Append(txn.NewUpdateCLR(rec))
@@ -166,12 +167,12 @@ func (tm *TransactionManager) Abort(txn *TransactionContext) error {
 
 			pageId:= rec.RID().PageID
 			frame, err := tm.bufferPool.GetPage(pageId)
-			defer tm.bufferPool.UnpinPage(frame, true)
 			frame.PageLatch.Lock()
 			hp := frame.AsHeapPage()
 			copy(hp.AccessTuple(rec.RID()), rec.BeforeImage())
 			frame.MonotonicallyUpdateLSN(lsn)
 			frame.PageLatch.Unlock()
+			tm.bufferPool.UnpinPage(frame, true)
 		}
 	}
 
@@ -181,6 +182,8 @@ func (tm *TransactionManager) Abort(txn *TransactionContext) error {
 	}
 	
 	txn.ReleaseAllLocks()
+	tm.activeTxns.Delete(txn.id)
+	txn.Reset(txn.id)
 	tm.putTxnToPool(txn)
 
 	return nil

@@ -112,20 +112,21 @@ func (bp *BufferPool) GetPage(pageID common.PageID) (*PageFrame, error) {
 
 		// write victim to disk if dirty
 		if frame.getDirty() {
-			if bp.logManager != nil {
-				if err := bp.logManager.WaitUntilFlushed(frame.LSN()); err != nil {
-					return nil, err
-				}
-			}
-
 			file, err := bp.StorageManager().GetDBFile(id.Oid)
 			if err != nil {
 				frame.setEvicting(false)
 				frame.lock.Unlock()
 				return nil, err
 			}
-
 			frame.PageLatch.RLock()
+			if bp.logManager != nil {
+				if err := bp.logManager.WaitUntilFlushed(frame.LSN()); err != nil {
+					frame.PageLatch.RUnlock()
+					frame.setEvicting(false)
+					frame.lock.Unlock()
+					return nil, err
+				}
+			}
 			err = file.WritePage(int(id.PageNum), frame.Bytes[:])
 			frame.PageLatch.RUnlock()
 
@@ -196,6 +197,14 @@ func (bp *BufferPool) GetPage(pageID common.PageID) (*PageFrame, error) {
 			return nil, err
 		}
 		frame.PageLatch.RLock()
+		if bp.logManager != nil {
+			if err := bp.logManager.WaitUntilFlushed(frame.LSN()); err != nil {
+				frame.PageLatch.RUnlock()
+				frame.setEvicting(false)
+				frame.lock.Unlock()
+				return nil, err
+			}
+		}
 		err = file.WritePage(int(id.PageNum), frame.Bytes[:])
 		frame.PageLatch.RUnlock()
 
@@ -260,13 +269,23 @@ func (bp *BufferPool) FlushAllPages() error {
 		if frame.getDirty() && frame.getEvicting() != true && currId == id {
 			file, err := bp.StorageManager().GetDBFile(id.Oid)
 			if err != nil {
+				frame.lock.Unlock()
 				flushErr = err
 				return false
 			}
 			frame.PageLatch.RLock()
+			if bp.logManager != nil {
+				if err := bp.logManager.WaitUntilFlushed(frame.LSN()); err != nil {
+					frame.PageLatch.RUnlock()
+					frame.lock.Unlock()
+					flushErr = err
+					return false
+				}
+			}
 			err = file.WritePage(int(id.PageNum), frame.Bytes[:])
 			frame.PageLatch.RUnlock()
 			if err != nil {
+				frame.lock.Unlock()
 				flushErr = err
 				return false
 			}

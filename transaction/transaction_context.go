@@ -18,7 +18,7 @@ type logRecordBuffer struct {
 
 // newLogRecordBuffer creates a stack with some pre-allocated capacity.
 func newLogRecordBuffer() *logRecordBuffer {
-	return &logRecordBuffer{buffer:  make([]byte, 0, 4096), offsets: make([]int, 0, 64),}
+	return &logRecordBuffer{buffer: make([]byte, 0, 4096), offsets: make([]int, 0, 64)}
 }
 
 // allocate reserves `totalSize` bytes in the buffer for a new record.
@@ -28,12 +28,12 @@ func (s *logRecordBuffer) allocate(totalSize int) []byte {
 	start := len(s.buffer)
 	end := start + totalSize
 
-	if end > cap(s.buffer){
+	if end > cap(s.buffer) {
 		newCap := cap(s.buffer)
-		if newCap == 0{
+		if newCap == 0 {
 			newCap = 256
 		}
-		for end > newCap{
+		for end > newCap {
 			newCap *= 2
 		}
 		new_buffer := make([]byte, len(s.buffer), newCap)
@@ -55,8 +55,8 @@ func (s *logRecordBuffer) len() int {
 // The index `i` corresponds to the order of insertion (0 is the first record).
 func (s *logRecordBuffer) get(i int) storage.LogRecord {
 	start := s.offsets[i]
-	end:= len(s.buffer)
-	if i+1 < len(s.offsets){
+	end := len(s.buffer)
+	if i+1 < len(s.offsets) {
 		end = s.offsets[i+1]
 	}
 	return storage.AsLogRecord(s.buffer[start:end])
@@ -108,21 +108,20 @@ func (txn *TransactionContext) AddCommitTask(task IndexTask) {
 	txn.commitActions = append(txn.commitActions, task)
 }
 
-
 // AcquireLock attempts to acquire a lock on the specified resource, checking for reentrancy (if the lock is already
 // held).  If the lock cannot be acquired immediately, this call may block or fail due
 // to a deadlock.
 func (txn *TransactionContext) AcquireLock(tag DBLockTag, mode DBLockMode) error {
 	curr_mode, held := txn.heldLocks[tag]
-	if held && curr_mode == mode{
+	if held && curr_mode == mode {
 		return nil
 	}
 
 	err := txn.lm.Lock(txn.id, tag, mode)
-	if err == nil{
+	if err == nil {
 		curr_mode, held := txn.heldLocks[tag]
 
-		if held && weakerLock(curr_mode, mode){
+		if held && weakerLock(curr_mode, mode) {
 			return nil
 		}
 		txn.heldLocks[tag] = mode
@@ -140,18 +139,21 @@ func (txn *TransactionContext) HeldLock(tag DBLockTag) (DBLockMode, bool) {
 // ReleaseAllLocks releases all locks held by this transaction.
 // This is typically called during the Commit or Abort phase of the transaction lifecycle.
 func (txn *TransactionContext) ReleaseAllLocks() {
-	for tag, _ := range txn.heldLocks{
+	for tag, _ := range txn.heldLocks {
 		txn.lm.Unlock(txn.id, tag)
 	}
+	clear(txn.heldLocks)
 }
 
 // Reset clears the transaction context for reuse.
 // This is critical when using sync.Pool to avoid leaking data between users.
 func (txn *TransactionContext) Reset(id common.TransactionID) {
-	txn.id = common.TransactionID(99)
-	txn.lm = NewLockManager()
-	txn.logRecords = newLogRecordBuffer()
-	txn.heldLocks = make(map[DBLockTag]DBLockMode)
+	for tag := range txn.heldLocks {
+		_ = txn.lm.Unlock(txn.id, tag)
+	}
+	clear(txn.heldLocks)
+	txn.id = id
+	txn.logRecords.reset()
 	txn.abortActions = txn.abortActions[:0]
 }
 

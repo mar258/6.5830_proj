@@ -7,6 +7,7 @@ import (
 	"mit.edu/dsg/godb/common"
 	"mit.edu/dsg/godb/storage"
 	"mit.edu/dsg/godb/transaction"
+	"sync/atomic"
 )
 
 // TableHeap represents a physical table stored as a heap file on disk.
@@ -18,6 +19,7 @@ type TableHeap struct {
 	bufferPool  *storage.BufferPool
 	logManager  storage.LogManager
 	lockManager *transaction.LockManager
+	lastFreePage atomic.Uint32
 }
 
 // NewTableHeap creates a TableHeap and performs a metadata scan to initialize stats.
@@ -44,27 +46,33 @@ func (tableHeap *TableHeap) StorageSchema() *storage.RawTupleDesc {
 
 // InsertTuple inserts a tuple into the TableHeap. It should find a free space, allocating if needed, and return the found slot.
 func (tableHeap *TableHeap) InsertTuple(txn *transaction.TransactionContext, row storage.RawTuple) (common.RecordID, error) {
-	tableTag := transaction.NewTableLockTag(tableHeap.oid)
 	if txn != nil {
-		err := txn.AcquireLock(tableTag, transaction.LockModeIX)
-		if err != nil {
-			return common.RecordID{}, err
-		}
-	}
+        tableTag := transaction.NewTableLockTag(tableHeap.oid)
+        if err := txn.AcquireLock(tableTag, transaction.LockModeIX); err != nil {
+            return common.RecordID{}, err
+        }
+    }
 
-	storageManager := tableHeap.bufferPool.StorageManager()
-	file, err := storageManager.GetDBFile(tableHeap.oid)
-	if err != nil {
-		return common.RecordID{}, err
-	}
+    storageManager := tableHeap.bufferPool.StorageManager()
+    file, err := storageManager.GetDBFile(tableHeap.oid)
+    if err != nil {
+        return common.RecordID{}, err
+    }
+    
 	numPages, err := file.NumPages()
 	if err != nil {
 		return common.RecordID{}, err
 	}
 
-	// Find space on existing heap pages
-	for numPage := 0; numPage < numPages; numPage++ {
-		pageID := common.PageID{Oid: tableHeap.oid, PageNum: int32(numPage)}
+	startPage := 0
+	if numPages > 0 {
+		startPage = int(tableHeap.lastFreePage.Load()) % numPages
+	}
+
+	for i := 0; i < numPages; i++ {
+		pageNum := (startPage + i) % numPages
+		pageID := common.PageID{Oid: tableHeap.oid, PageNum: int32(pageNum)}
+
 		frame, err := tableHeap.bufferPool.GetPage(pageID)
 		if err != nil {
 			continue
@@ -72,34 +80,45 @@ func (tableHeap *TableHeap) InsertTuple(txn *transaction.TransactionContext, row
 
 		frame.PageLatch.Lock()
 		heapPage := frame.AsHeapPage()
+
+		if heapPage.NumSlots() == 0 {
+			frame.PageLatch.Unlock()
+			tableHeap.bufferPool.UnpinPage(frame, false)
+			continue
+		}
+
 		freeSlot := heapPage.FindFreeSlot()
 		if freeSlot != -1 {
 			rid := common.RecordID{PageID: pageID, Slot: int32(freeSlot)}
-			tupleTag := transaction.NewTupleLockTag(rid)
 
 			if txn != nil {
-				err = txn.AcquireLock(tupleTag, transaction.LockModeX)
-				if err != nil {
+				if err := txn.AcquireLock(transaction.NewTupleLockTag(rid), transaction.LockModeX); err != nil {
+					frame.PageLatch.Unlock()
+					tableHeap.bufferPool.UnpinPage(frame, false)
 					return common.RecordID{}, err
 				}
-				rec := txn.NewInsertRecord(rid, row)
-				lsn, err := tableHeap.logManager.Append(rec)
+				lsn, err := tableHeap.logManager.Append(txn.NewInsertRecord(rid, row))
 				if err != nil {
+					frame.PageLatch.Unlock()
+					tableHeap.bufferPool.UnpinPage(frame, false)
 					return common.RecordID{}, err
 				}
 				frame.MonotonicallyUpdateLSN(lsn)
 			}
-			tuple := heapPage.AccessTuple(rid)
-			copy(tuple, row)
+
+			copy(heapPage.AccessTuple(rid), row)
 			heapPage.MarkAllocated(rid, true)
+
+			tableHeap.lastFreePage.Store(uint32(pageNum))
+
 			frame.PageLatch.Unlock()
 			tableHeap.bufferPool.UnpinPage(frame, true)
 			return rid, nil
 		}
+
 		frame.PageLatch.Unlock()
 		tableHeap.bufferPool.UnpinPage(frame, false)
 	}
-
 	// No space found on existing pages: allocate a new heap page.
 	numPage, err := file.AllocatePage(1)
 	if err != nil {
@@ -144,6 +163,7 @@ func (tableHeap *TableHeap) InsertTuple(txn *transaction.TransactionContext, row
 
 	tableHeap.bufferPool.UnpinPage(frame, true)
 
+	tableHeap.lastFreePage.Store(uint32(numPage))
 	return rid, nil
 }
 

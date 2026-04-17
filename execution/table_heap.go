@@ -3,22 +3,23 @@ package execution
 import (
 	"errors"
 
+	"sync/atomic"
+
 	"mit.edu/dsg/godb/catalog"
 	"mit.edu/dsg/godb/common"
 	"mit.edu/dsg/godb/storage"
 	"mit.edu/dsg/godb/transaction"
-	"sync/atomic"
 )
 
 // TableHeap represents a physical table stored as a heap file on disk.
 // It handles the insertion, update, deletion, and reading of tuples, managing
 // interactions with the BufferPool, LockManager, and LogManager.
 type TableHeap struct {
-	oid         common.ObjectID
-	desc        *storage.RawTupleDesc
-	bufferPool  *storage.BufferPool
-	logManager  storage.LogManager
-	lockManager *transaction.LockManager
+	oid          common.ObjectID
+	desc         *storage.RawTupleDesc
+	bufferPool   *storage.BufferPool
+	logManager   storage.LogManager
+	lockManager  *transaction.LockManager
 	lastFreePage atomic.Uint32
 }
 
@@ -47,18 +48,18 @@ func (tableHeap *TableHeap) StorageSchema() *storage.RawTupleDesc {
 // InsertTuple inserts a tuple into the TableHeap. It should find a free space, allocating if needed, and return the found slot.
 func (tableHeap *TableHeap) InsertTuple(txn *transaction.TransactionContext, row storage.RawTuple) (common.RecordID, error) {
 	if txn != nil {
-        tableTag := transaction.NewTableLockTag(tableHeap.oid)
-        if err := txn.AcquireLock(tableTag, transaction.LockModeIX); err != nil {
-            return common.RecordID{}, err
-        }
-    }
+		tableTag := transaction.NewTableLockTag(tableHeap.oid)
+		if err := txn.AcquireLock(tableTag, transaction.LockModeIX); err != nil {
+			return common.RecordID{}, err
+		}
+	}
 
-    storageManager := tableHeap.bufferPool.StorageManager()
-    file, err := storageManager.GetDBFile(tableHeap.oid)
-    if err != nil {
-        return common.RecordID{}, err
-    }
-    
+	storageManager := tableHeap.bufferPool.StorageManager()
+	file, err := storageManager.GetDBFile(tableHeap.oid)
+	if err != nil {
+		return common.RecordID{}, err
+	}
+
 	numPages, err := file.NumPages()
 	if err != nil {
 		return common.RecordID{}, err
@@ -146,11 +147,15 @@ func (tableHeap *TableHeap) InsertTuple(txn *transaction.TransactionContext, row
 	if txn != nil {
 		err = txn.AcquireLock(tupleTag, transaction.LockModeX)
 		if err != nil {
+			frame.PageLatch.Unlock()
+			tableHeap.bufferPool.UnpinPage(frame, false)
 			return common.RecordID{}, err
 		}
 		rec := txn.NewInsertRecord(rid, row)
 		lsn, err := tableHeap.logManager.Append(rec)
 		if err != nil {
+			frame.PageLatch.Unlock()
+			tableHeap.bufferPool.UnpinPage(frame, false)
 			return common.RecordID{}, err
 		}
 		frame.MonotonicallyUpdateLSN(lsn)

@@ -3,8 +3,73 @@ package planner
 import (
 	"fmt"
 	"math"
+	"math/bits"
 	// "mit.edu/dsg/godb/common"
 )
+
+type Plan struct {
+	Tables   uint32  
+	Join 	JoinType
+	Cost     float64 
+	LeftChild *Plan
+	RightTable int 
+}
+
+type JoinOptimizer struct {
+	memo      map[uint32]*Plan
+	numTables int
+}
+
+func (opt *JoinOptimizer) FindBestJoin() *Plan {
+	// base case: seq scan of each table
+	for i:=0; i< opt.numTables; i++{
+		opt.memo[1 << i] = &Plan{
+			Tables:     uint32(1 << i),
+			Cost:       0,
+			LeftChild:  nil,
+			RightTable: i,
+		}
+	}
+
+	for size := 1; size < opt.numTables; size++{
+		// look thru subplans so far
+		for leftMask, leftPlan := range opt.memo{
+			if countSetBits(leftMask) != size {
+				continue
+			}
+
+			// try adding every table that isn't already in the plan
+			for i := 0; i < opt.numTables; i++ {
+				tableBit := uint32(1 << i)
+
+				// If the table is not in the subplan, we can join it
+				if (leftMask & tableBit) == 0 {
+					newMask := leftMask | tableBit
+
+					// TODO: replace with estimator-driven cost once stats are available.
+					joinCost := 1.0
+					totalCost := leftPlan.Cost + joinCost
+
+					if existing, ok := opt.memo[newMask]; !ok || totalCost < existing.Cost {
+						opt.memo[newMask] = &Plan{
+							Tables:     newMask,
+							Cost:       totalCost,
+							LeftChild:  leftPlan,
+							RightTable: i,
+						}
+					}
+				}
+			}
+
+		}
+	}
+	fullMask := uint32((1 << opt.numTables) - 1)
+	return opt.memo[fullMask]
+}
+
+func countSetBits(mask uint32) int {
+	return bits.OnesCount32(mask)
+}
 
 type JoinCostEstimate struct {
 	Cost       float64 // current cost

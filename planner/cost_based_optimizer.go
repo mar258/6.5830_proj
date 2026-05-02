@@ -8,62 +8,141 @@ import (
 )
 
 type Plan struct {
-	Tables   uint32  
-	Join 	JoinType
-	Cost     float64 
-	LeftChild *Plan
-	RightTable int 
+	Tables      uint32
+	Join        JoinType
+	Cost        float64
+	OutputRows  float64
+	LeftChild   *Plan
+	RightChild  *Plan
 }
 
 type JoinOptimizer struct {
-	memo      map[uint32]*Plan
-	numTables int
+	memo       map[uint32]*Plan
+	numTables  int
+	estimators []JoinCostEstimator
+	// TableRows[i] is the estimated row count for base table i; if shorter than numTables, missing entries default to 1.
+	TableRows []float64
+	JoinType  JoinType
+	Predicates []Expr
+	// AvailableBuffers is passed through to estimators (e.g. BNLJ).
+	AvailableBuffers int
+}
+
+func (opt *JoinOptimizer) tableRowCount(tableIdx int) float64 {
+	if tableIdx >= 0 && tableIdx < len(opt.TableRows) && opt.TableRows[tableIdx] > 0 {
+		return opt.TableRows[tableIdx]
+	}
+	return 1
+}
+
+func (opt *JoinOptimizer) estimatorsForSearch() []JoinCostEstimator {
+	if len(opt.estimators) > 0 {
+		return opt.estimators
+	}
+	return []JoinCostEstimator{
+		&IndexNestedLoopJoinCostEstimator{},
+		&SortMergeJoinCostEstimator{},
+		&HashJoinCostEstimator{},
+		&BlockNestedLoopJoinCostEstimator{},
+	}
+}
+
+// bestJoinCost finds the cheapest applicable physical join between two subtrees (tries both outer/inner orderings).
+func (opt *JoinOptimizer) bestJoinCost(leftPlan, rightPlan *Plan) (joinCost float64, outputRows float64, ok bool) {
+	joinCost = math.Inf(1)
+	outputRows = math.Inf(1)
+	buffers := opt.AvailableBuffers
+	if buffers <= 0 {
+		buffers = 1
+	}
+	try := func(outer, inner *Plan) {
+		in := JoinCostInput{
+			LeftRows:         outer.OutputRows,
+			RightRows:        inner.OutputRows,
+			LeftRowWidth:     1,
+			RightRowWidth:    1,
+			JoinType:         opt.JoinType,
+			Predicates:       opt.Predicates,
+			AvailableBuffers: buffers,
+		}
+		for _, est := range opt.estimatorsForSearch() {
+			if !est.CanApply(in) {
+				continue
+			}
+			e := est.Estimate(in)
+			if !math.IsInf(e.Cost, 1) && e.Cost < joinCost {
+				joinCost = e.Cost
+				outputRows = e.OutputRows
+				ok = true
+			}
+		}
+	}
+	try(leftPlan, rightPlan)
+	try(rightPlan, leftPlan)
+	return joinCost, outputRows, ok
 }
 
 func (opt *JoinOptimizer) FindBestJoin() *Plan {
-	// base case: seq scan of each table
-	for i:=0; i< opt.numTables; i++{
-		opt.memo[1 << i] = &Plan{
+	opt.memo = make(map[uint32]*Plan)
+
+	// Base case: 0 cost for one table
+	for i := 0; i < opt.numTables; i++ {
+		opt.memo[1<<i] = &Plan{
 			Tables:     uint32(1 << i),
+			Join:       opt.JoinType,
 			Cost:       0,
+			OutputRows: opt.tableRowCount(i),
 			LeftChild:  nil,
-			RightTable: i,
+			RightChild: nil,
 		}
 	}
 
-	for size := 1; size < opt.numTables; size++{
-		// look thru subplans so far
-		for leftMask, leftPlan := range opt.memo{
-			if countSetBits(leftMask) != size {
+	fullMask := uint32((1 << opt.numTables) - 1)
+	for nbits := 2; nbits <= opt.numTables; nbits++ {
+		for mask := uint32(3); mask <= fullMask; mask++ {
+			if countSetBits(mask) != nbits {
 				continue
 			}
+			var best *Plan
+			bestCost := math.Inf(1)
 
-			// try adding every table that isn't already in the plan
+			// Left-deep only: each join adds one base table on the right; left is the
+			// optimal plan for the remaining tables.
 			for i := 0; i < opt.numTables; i++ {
 				tableBit := uint32(1 << i)
-
-				// If the table is not in the subplan, we can join it
-				if (leftMask & tableBit) == 0 {
-					newMask := leftMask | tableBit
-
-					// TODO: replace with estimator-driven cost once stats are available.
-					joinCost := 1.0
-					totalCost := leftPlan.Cost + joinCost
-
-					if existing, ok := opt.memo[newMask]; !ok || totalCost < existing.Cost {
-						opt.memo[newMask] = &Plan{
-							Tables:     newMask,
-							Cost:       totalCost,
-							LeftChild:  leftPlan,
-							RightTable: i,
-						}
+				if mask&tableBit == 0 {
+					continue
+				}
+				leftMask := mask ^ tableBit
+				leftPlan := opt.memo[leftMask]
+				rightPlan := opt.memo[tableBit]
+				if leftPlan == nil || rightPlan == nil {
+					continue
+				}
+				jc, outRows, ok := opt.bestJoinCost(leftPlan, rightPlan)
+				if !ok {
+					continue
+				}
+				total := leftPlan.Cost + rightPlan.Cost + jc
+				if total < bestCost {
+					bestCost = total
+					best = &Plan{
+						Tables:     mask,
+						Join:       opt.JoinType,
+						Cost:       total,
+						OutputRows: outRows,
+						LeftChild:  leftPlan,
+						RightChild: rightPlan,
 					}
 				}
 			}
 
+			if best != nil {
+				opt.memo[mask] = best
+			}
 		}
 	}
-	fullMask := uint32((1 << opt.numTables) - 1)
+
 	return opt.memo[fullMask]
 }
 

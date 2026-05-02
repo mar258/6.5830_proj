@@ -2,7 +2,8 @@ package planner
 
 import (
 	"testing"
-	// "github.com/xwb1989/sqlparser"
+
+	"mit.edu/dsg/godb/common"
 )
 
 // Test suite helpers
@@ -36,7 +37,11 @@ func TestSimpleEquiJoin(t *testing.T) {
 		RightRows:  1_000_000,
 		JoinType:   Inner,
 		Predicates: []Expr{
-			// users.id = orders.user_id
+			NewComparisonExpression(
+				NewConstantValueExpression(common.NewIntValue(0)),
+				NewConstantValueExpression(common.NewIntValue(0)),
+				Equal,
+			),
 		},
 		AvailableBuffers: 100,
 	}

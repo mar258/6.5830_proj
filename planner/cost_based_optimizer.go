@@ -8,12 +8,17 @@ import (
 )
 
 type Plan struct {
-	Tables      uint32
-	Join        JoinType
-	Cost        float64
-	OutputRows  float64
-	LeftChild   *Plan
-	RightChild  *Plan
+	Tables       uint32
+	JoinType     JoinType // logical join (INNER, LEFT, ...)
+	PhysicalJoin string   // physical op chosen at this node (estimator Name); empty for a leaf scan
+	Cost         float64
+	OutputRows   float64
+	LeftChild    *Plan // nil only for a leaf
+	RightTable   int   // base table index: sole table if leaf, otherwise table joined on the right
+}
+
+type JoinIndexMetadata interface {
+	InnerHasJoinIndex(innerTableIdx int, predicates []Expr) bool
 }
 
 type JoinOptimizer struct {
@@ -26,6 +31,8 @@ type JoinOptimizer struct {
 	Predicates []Expr
 	// AvailableBuffers is passed through to estimators (e.g. BNLJ).
 	AvailableBuffers int
+	// IndexMeta wires catalog/index info into join costing; optional.
+	IndexMeta JoinIndexMetadata
 }
 
 func (opt *JoinOptimizer) tableRowCount(tableIdx int) float64 {
@@ -47,39 +54,46 @@ func (opt *JoinOptimizer) estimatorsForSearch() []JoinCostEstimator {
 	}
 }
 
-// bestJoinCost finds the cheapest applicable physical join between two subtrees (tries both outer/inner orderings).
-func (opt *JoinOptimizer) bestJoinCost(leftPlan, rightPlan *Plan) (joinCost float64, outputRows float64, ok bool) {
+// bestJoinCost picks the cheapest physical join 
+func (opt *JoinOptimizer) bestJoinCost(leftPlan, rightPlan *Plan) (joinCost float64, outputRows float64, ok bool, physicalJoin string) {
 	joinCost = math.Inf(1)
 	outputRows = math.Inf(1)
 	buffers := opt.AvailableBuffers
 	if buffers <= 0 {
 		buffers = 1
 	}
-	try := func(outer, inner *Plan) {
-		in := JoinCostInput{
-			LeftRows:         outer.OutputRows,
-			RightRows:        inner.OutputRows,
-			LeftRowWidth:     1,
-			RightRowWidth:    1,
-			JoinType:         opt.JoinType,
-			Predicates:       opt.Predicates,
-			AvailableBuffers: buffers,
+	in := JoinCostInput{
+		LeftRows:               leftPlan.OutputRows,
+		RightRows:              rightPlan.OutputRows,
+		LeftRowWidth:           1,
+		RightRowWidth:          1,
+		JoinType:               opt.JoinType,
+		Predicates:             opt.Predicates,
+		AvailableBuffers:       buffers,
+		RightHasIndexOnJoinKey: opt.rightLeafHasJoinIndex(rightPlan),
+	}
+	for _, est := range opt.estimatorsForSearch() {
+		if !est.CanApply(in) {
+			continue
 		}
-		for _, est := range opt.estimatorsForSearch() {
-			if !est.CanApply(in) {
-				continue
-			}
-			e := est.Estimate(in)
-			if !math.IsInf(e.Cost, 1) && e.Cost < joinCost {
-				joinCost = e.Cost
-				outputRows = e.OutputRows
-				ok = true
-			}
+		e := est.Estimate(in)
+		if !math.IsInf(e.Cost, 1) && e.Cost < joinCost {
+			joinCost = e.Cost
+			outputRows = e.OutputRows
+			ok = true
+			physicalJoin = est.Name()
 		}
 	}
-	try(leftPlan, rightPlan)
-	try(rightPlan, leftPlan)
-	return joinCost, outputRows, ok
+	return joinCost, outputRows, ok, physicalJoin
+}
+
+// rightLeafHasJoinIndex reports whether the single-table child of this join step has a
+// join index on the inner side
+func (opt *JoinOptimizer) rightLeafHasJoinIndex(rightPlan *Plan) bool {
+	if opt.IndexMeta == nil || rightPlan == nil || rightPlan.LeftChild != nil {
+		return false
+	}
+	return opt.IndexMeta.InnerHasJoinIndex(rightPlan.RightTable, opt.Predicates)
 }
 
 func (opt *JoinOptimizer) FindBestJoin() *Plan {
@@ -88,12 +102,13 @@ func (opt *JoinOptimizer) FindBestJoin() *Plan {
 	// Base case: 0 cost for one table
 	for i := 0; i < opt.numTables; i++ {
 		opt.memo[1<<i] = &Plan{
-			Tables:     uint32(1 << i),
-			Join:       opt.JoinType,
-			Cost:       0,
-			OutputRows: opt.tableRowCount(i),
-			LeftChild:  nil,
-			RightChild: nil,
+			Tables:       uint32(1 << i),
+			JoinType:     opt.JoinType,
+			PhysicalJoin: "",
+			Cost:         0,
+			OutputRows:   opt.tableRowCount(i),
+			LeftChild:    nil,
+			RightTable:   i,
 		}
 	}
 
@@ -119,7 +134,7 @@ func (opt *JoinOptimizer) FindBestJoin() *Plan {
 				if leftPlan == nil || rightPlan == nil {
 					continue
 				}
-				jc, outRows, ok := opt.bestJoinCost(leftPlan, rightPlan)
+				jc, outRows, ok, physicalJoin := opt.bestJoinCost(leftPlan, rightPlan)
 				if !ok {
 					continue
 				}
@@ -127,12 +142,13 @@ func (opt *JoinOptimizer) FindBestJoin() *Plan {
 				if total < bestCost {
 					bestCost = total
 					best = &Plan{
-						Tables:     mask,
-						Join:       opt.JoinType,
-						Cost:       total,
-						OutputRows: outRows,
-						LeftChild:  leftPlan,
-						RightChild: rightPlan,
+						Tables:       mask,
+						JoinType:     opt.JoinType,
+						PhysicalJoin: physicalJoin,
+						Cost:         total,
+						OutputRows:   outRows,
+						LeftChild:    leftPlan,
+						RightTable:   i,
 					}
 				}
 			}
@@ -194,9 +210,8 @@ func (ce *IndexNestedLoopJoinCostEstimator) CanApply(input JoinCostInput) bool {
 	// Usually only valid when:
 	// 1. this is an INNER join (for a first version),
 	// 2. the predicate is an equijoin,
-	// 3. the inner side has a usable index.
+	// 3. the inner side has a usable index. (JoinCostInput.RightHasIndexOnJoinKey)
 	//
-	// Adjust this depending on whether your optimizer can choose which side is inner.
 	if input.JoinType != Inner {
 		return false
 	}

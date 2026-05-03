@@ -9,7 +9,6 @@ import (
 
 type Plan struct {
 	Tables       uint32
-	JoinType     JoinType // logical join (INNER, LEFT, ...)
 	PhysicalJoin string   // physical op chosen at this node (estimator Name); empty for a leaf scan
 	Cost         float64
 	OutputRows   float64
@@ -27,7 +26,6 @@ type JoinOptimizer struct {
 	estimators []JoinCostEstimator
 	// TableRows[i] is the estimated row count for base table i; if shorter than numTables, missing entries default to 1.
 	TableRows []float64
-	JoinType  JoinType
 	Predicates []Expr
 	// AvailableBuffers is passed through to estimators (e.g. BNLJ).
 	AvailableBuffers int
@@ -67,7 +65,6 @@ func (opt *JoinOptimizer) bestJoinCost(leftPlan, rightPlan *Plan) (joinCost floa
 		RightRows:              rightPlan.OutputRows,
 		LeftRowWidth:           1,
 		RightRowWidth:          1,
-		JoinType:               opt.JoinType,
 		Predicates:             opt.Predicates,
 		AvailableBuffers:       buffers,
 		RightHasIndexOnJoinKey: opt.rightLeafHasJoinIndex(rightPlan),
@@ -103,7 +100,6 @@ func (opt *JoinOptimizer) FindBestJoin() *Plan {
 	for i := 0; i < opt.numTables; i++ {
 		opt.memo[1<<i] = &Plan{
 			Tables:       uint32(1 << i),
-			JoinType:     opt.JoinType,
 			PhysicalJoin: "",
 			Cost:         0,
 			OutputRows:   opt.tableRowCount(i),
@@ -143,7 +139,6 @@ func (opt *JoinOptimizer) FindBestJoin() *Plan {
 					bestCost = total
 					best = &Plan{
 						Tables:       mask,
-						JoinType:     opt.JoinType,
 						PhysicalJoin: physicalJoin,
 						Cost:         total,
 						OutputRows:   outRows,
@@ -177,7 +172,6 @@ type JoinCostInput struct {
 	LeftRowWidth  float64
 	RightRowWidth float64
 
-	JoinType   JoinType
 	Predicates []Expr
 
 	LeftHasOrdering  bool
@@ -207,14 +201,6 @@ func (ce *IndexNestedLoopJoinCostEstimator) Name() string {
 }
 
 func (ce *IndexNestedLoopJoinCostEstimator) CanApply(input JoinCostInput) bool {
-	// Usually only valid when:
-	// 1. this is an INNER join (for a first version),
-	// 2. the predicate is an equijoin,
-	// 3. the inner side has a usable index. (JoinCostInput.RightHasIndexOnJoinKey)
-	//
-	if input.JoinType != Inner {
-		return false
-	}
 	if !hasEquiJoinPredicate(input.Predicates) {
 		return false
 	}
@@ -252,11 +238,6 @@ func (ce *SortMergeJoinCostEstimator) Name() string {
 }
 
 func (ce *SortMergeJoinCostEstimator) CanApply(input JoinCostInput) bool {
-	// Usually requires a mergeable/sortable join predicate.
-	// For a first version, assume only equijoins are supported.
-	if input.JoinType != Inner {
-		return false
-	}
 	if !hasEquiJoinPredicate(input.Predicates) {
 		return false
 	}
@@ -294,10 +275,6 @@ func (ce *HashJoinCostEstimator) Name() string {
 }
 
 func (ce *HashJoinCostEstimator) CanApply(input JoinCostInput) bool {
-	// Usually only valid for equijoins.
-	if input.JoinType != Inner {
-		return false
-	}
 	if !hasEquiJoinPredicate(input.Predicates) {
 		return false
 	}
@@ -329,14 +306,7 @@ func (ce *BlockNestedLoopJoinCostEstimator) Name() string {
 }
 
 func (ce *BlockNestedLoopJoinCostEstimator) CanApply(input JoinCostInput) bool {
-	// BNLJ is the usual fallback and supports most join predicates.
-	switch input.JoinType {
-	case Inner:
-		return true
-	default:
-		// Expand later if you support outer joins in physical planning.
-		return false
-	}
+	return true
 }
 
 func (ce *BlockNestedLoopJoinCostEstimator) Estimate(input JoinCostInput) JoinCostEstimate {

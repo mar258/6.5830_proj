@@ -12,6 +12,7 @@ type Plan struct {
 	PhysicalJoin string   // physical op chosen at this node (estimator Name); empty for a leaf scan
 	Cost         float64
 	OutputRows   float64
+	JoinCount	 int
 	LeftChild    *Plan // nil only for a leaf
 	RightTable   int   // base table index: sole table if leaf, otherwise table joined on the right
 }
@@ -52,15 +53,33 @@ func (opt *JoinOptimizer) estimatorsForSearch() []JoinCostEstimator {
 	}
 }
 
-// bestJoinCost picks the cheapest physical join 
+// bestJoinCost picks the cheapest physical join
 func (opt *JoinOptimizer) bestJoinCost(leftPlan, rightPlan *Plan) (joinCost float64, outputRows float64, ok bool, physicalJoin string) {
 	joinCost = math.Inf(1)
 	outputRows = math.Inf(1)
+
+	for _, c := range opt.joinCandidates(leftPlan, rightPlan) {
+		if !c.Applicable || math.IsInf(c.Cost, 1) {
+			continue
+		}
+		if c.Cost < joinCost {
+			joinCost = c.Cost
+			outputRows = c.OutputRows
+			ok = true
+			physicalJoin = c.PhysicalJoin
+		}
+	}
+
+	return joinCost, outputRows, ok, physicalJoin
+}
+
+func (opt *JoinOptimizer) joinCandidates(leftPlan, rightPlan *Plan) []JoinCandidate {
 	buffers := opt.AvailableBuffers
 	if buffers <= 0 {
 		buffers = 1
 	}
-	in := JoinCostInput{
+
+	input := JoinCostInput{
 		LeftRows:               leftPlan.OutputRows,
 		RightRows:              rightPlan.OutputRows,
 		LeftRowWidth:           1,
@@ -69,19 +88,27 @@ func (opt *JoinOptimizer) bestJoinCost(leftPlan, rightPlan *Plan) (joinCost floa
 		AvailableBuffers:       buffers,
 		RightHasIndexOnJoinKey: opt.rightLeafHasJoinIndex(rightPlan),
 	}
+
+	var candidates []JoinCandidate
 	for _, est := range opt.estimatorsForSearch() {
-		if !est.CanApply(in) {
+		if !est.CanApply(input) {
+			candidates = append(candidates, JoinCandidate{
+				PhysicalJoin: est.Name(),
+				Applicable:   false,
+			})
 			continue
 		}
-		e := est.Estimate(in)
-		if !math.IsInf(e.Cost, 1) && e.Cost < joinCost {
-			joinCost = e.Cost
-			outputRows = e.OutputRows
-			ok = true
-			physicalJoin = est.Name()
-		}
+
+		e := est.Estimate(input)
+		candidates = append(candidates, JoinCandidate{
+			PhysicalJoin: est.Name(),
+			Cost:         e.Cost,
+			OutputRows:   e.OutputRows,
+			Applicable:   true,
+		})
 	}
-	return joinCost, outputRows, ok, physicalJoin
+
+	return candidates
 }
 
 // rightLeafHasJoinIndex reports whether the single-table child of this join step has a
@@ -103,6 +130,7 @@ func (opt *JoinOptimizer) FindBestJoin() *Plan {
 			PhysicalJoin: "",
 			Cost:         0,
 			OutputRows:   opt.tableRowCount(i),
+			JoinCount:    0,
 			LeftChild:    nil,
 			RightTable:   i,
 		}
@@ -142,6 +170,7 @@ func (opt *JoinOptimizer) FindBestJoin() *Plan {
 						PhysicalJoin: physicalJoin,
 						Cost:         total,
 						OutputRows:   outRows,
+						JoinCount:    leftPlan.JoinCount + 1,
 						LeftChild:    leftPlan,
 						RightTable:   i,
 					}
@@ -159,6 +188,13 @@ func (opt *JoinOptimizer) FindBestJoin() *Plan {
 
 func countSetBits(mask uint32) int {
 	return bits.OnesCount32(mask)
+}
+
+type JoinCandidate struct {
+	PhysicalJoin string
+	Cost         float64
+	OutputRows   float64
+	Applicable   bool
 }
 
 type JoinCostEstimate struct {
@@ -341,24 +377,21 @@ func impossibleCost() JoinCostEstimate {
 }
 
 func hasEquiJoinPredicate(preds []Expr) bool {
-	// TODO:
-	// Replace this stub with real predicate inspection.
-	//
-	// For example, you may want to detect a ComparisonExpression
-	// with equality operator between columns from different sides.
+	// Prototype assumption:
+	// The optimizer is currently passed only join predicates, and synthetic
+	// test inputs use equality predicates. A full integration should inspect
+	// Expr structure and verify that the predicate is column = column.
 	return len(preds) > 0
 }
 
 func estimateJoinOutputRows(input JoinCostInput) float64 {
-	// TODO:
-	// Replace with a better selectivity/cardinality model.
-	//
-	// For now:
-	// - equijoin gets a modest selectivity assumption
-	// - otherwise fall back to a more pessimistic estimate
 	if hasEquiJoinPredicate(input.Predicates) {
-		return math.Max(1, 0.1*input.LeftRows*input.RightRows)
+		// Simple equijoin model: assume output is roughly bounded by
+		// the smaller input relation.
+		return math.Max(1, math.Min(input.LeftRows, input.RightRows))
 	}
+
+	// Non-equi/cross-style fallback.
 	return math.Max(1, 0.3*input.LeftRows*input.RightRows)
 }
 

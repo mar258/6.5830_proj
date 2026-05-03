@@ -63,7 +63,7 @@ func (opt *JoinOptimizer) bestJoinCost(leftPlan, rightPlan *Plan) (joinCost floa
 	for _, c := range opt.joinCandidates(leftPlan, rightPlan) {
 		if !c.Applicable || math.IsInf(c.Cost, 1) {
 			continue
-		}w
+		}
 		if c.Cost < joinCost {
 			joinCost = c.Cost
 			outputRows = c.OutputRows

@@ -218,7 +218,6 @@ func TestCBOThreeWayJoinChoosesSmallTablesFirst(t *testing.T) {
 		},
 	}
 
-<<<<<<< HEAD
 	plan := opt.FindBestJoin()
 	if plan == nil {
 		t.Fatal("expected a plan")
@@ -365,27 +364,7 @@ type fakeIndexMeta struct {
 func (m fakeIndexMeta) InnerHasJoinIndex(innerTableIdx int, predicates []Expr) bool {
 	return m.indexedTables[innerTableIdx]
 }
-||||||| parent of 809f035 (added explain UI for cbo)
-// End to end logical rule + CBO integration tests
-=======
-// End to end logical rule + CBO integration tests
 
-//CBO Explain test
-func TestCBOExplainThreeWayJoin(t *testing.T) {
-    opt := &JoinOptimizer{
-        numTables: 3,
-        TableRows: []float64{1_000_000, 1_000, 10},
-        JoinType: Inner,
-        Predicates: []Expr{
-            NewComparisonExpression(
-                NewConstantValueExpression(common.NewIntValue(0)),
-                NewConstantValueExpression(common.NewIntValue(0)),
-                Equal,
-            ),
-        },
-        AvailableBuffers: 100,
-    }
+// Plan comparison unit tests (2-way), does it choose the right plan (hash vs BNLJ vs IndexLJ)?
 
-    t.Log("\n" + ExplainBestJoin(opt))
-}
->>>>>>> 809f035 (added explain UI for cbo)
+// End to end logical rule + CBO integration tests

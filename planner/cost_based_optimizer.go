@@ -15,6 +15,8 @@ type Plan struct {
 	JoinCount	 int
 	LeftChild    *Plan // nil only for a leaf
 	RightTable   int   // base table index: sole table if leaf, otherwise table joined on the right
+
+	Candidates []JoinCandidate // candidate physical joins considered at this step
 }
 
 type JoinIndexMetadata interface {
@@ -61,7 +63,7 @@ func (opt *JoinOptimizer) bestJoinCost(leftPlan, rightPlan *Plan) (joinCost floa
 	for _, c := range opt.joinCandidates(leftPlan, rightPlan) {
 		if !c.Applicable || math.IsInf(c.Cost, 1) {
 			continue
-		}
+		}w
 		if c.Cost < joinCost {
 			joinCost = c.Cost
 			outputRows = c.OutputRows
@@ -158,7 +160,8 @@ func (opt *JoinOptimizer) FindBestJoin() *Plan {
 				if leftPlan == nil || rightPlan == nil {
 					continue
 				}
-				jc, outRows, ok, physicalJoin := opt.bestJoinCost(leftPlan, rightPlan)
+				candidates := opt.joinCandidates(leftPlan, rightPlan)
+				jc, outRows, ok, physicalJoin := bestCandidate(candidates)
 				if !ok {
 					continue
 				}
@@ -173,6 +176,7 @@ func (opt *JoinOptimizer) FindBestJoin() *Plan {
 						JoinCount:    leftPlan.JoinCount + 1,
 						LeftChild:    leftPlan,
 						RightTable:   i,
+						Candidates: candidates,
 					}
 				}
 			}
@@ -184,6 +188,25 @@ func (opt *JoinOptimizer) FindBestJoin() *Plan {
 	}
 
 	return opt.memo[fullMask]
+}
+
+func bestCandidate(candidates []JoinCandidate) (joinCost float64, outputRows float64, ok bool, physicalJoin string) {
+	joinCost = math.Inf(1)
+	outputRows = math.Inf(1)
+
+	for _, c := range candidates {
+		if !c.Applicable || math.IsInf(c.Cost, 1) {
+			continue
+		}
+		if c.Cost < joinCost {
+			joinCost = c.Cost
+			outputRows = c.OutputRows
+			ok = true
+			physicalJoin = c.PhysicalJoin
+		}
+	}
+
+	return joinCost, outputRows, ok, physicalJoin
 }
 
 func countSetBits(mask uint32) int {

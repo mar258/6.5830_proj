@@ -356,10 +356,8 @@ func estimateJoinOutputRows(input JoinCostInput) float64 {
 	// For now:
 	// - equijoin gets a modest selectivity assumption
 	// - otherwise fall back to a more pessimistic estimate
-	if hasEquiJoinPredicate(input.Predicates) {
-		return math.Max(1, 0.1*input.LeftRows*input.RightRows)
-	}
-	return math.Max(1, 0.3*input.LeftRows*input.RightRows)
+	baseEstimate := math.Min(input.LeftRows, input.RightRows) * 1.5 
+    return math.Max(1.0, baseEstimate)
 }
 
 func estimateSortCost(rows float64) float64 {

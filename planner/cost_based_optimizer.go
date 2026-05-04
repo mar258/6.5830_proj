@@ -408,14 +408,12 @@ func hasEquiJoinPredicate(preds []Expr) bool {
 }
 
 func estimateJoinOutputRows(input JoinCostInput) float64 {
-	if hasEquiJoinPredicate(input.Predicates) {
-		// Simple equijoin model: assume output is roughly bounded by
-		// the smaller input relation.
-		return math.Max(1, math.Min(input.LeftRows, input.RightRows))
-	}
-
-	// Non-equi/cross-style fallback.
-	return math.Max(1, 0.3*input.LeftRows*input.RightRows)
+	// A standard naive heuristic: assume an inner join output size 
+    // is roughly bound by the larger of the two relations (e.g., an FK -> PK join)
+    // but scale down slightly to account for some rows not matching.
+    baseEstimate := math.Max(input.LeftRows, input.RightRows) * 0.8
+    
+    return math.Max(1.0, baseEstimate)
 }
 
 func estimateSortCost(rows float64) float64 {

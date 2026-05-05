@@ -148,6 +148,7 @@ func printUsage() {
 	fmt.Println("  -buffer <int>    Buffer pool size in pages (default: 1000)")
 	fmt.Println("\nShell Commands:")
 	fmt.Println("  help             Show this usage information")
+	fmt.Println("  joinopt <sql>;   Explain join-optimizer choice for a query")
 	fmt.Println("  exit, \\q         Exit the shell")
 	fmt.Println("\nNotes:")
 	fmt.Println("  - The CSV loader is a basic implementation. It does not escape characters.")
@@ -155,6 +156,44 @@ func printUsage() {
 	fmt.Println("  - Transactions are not supported in the shell (shell is inherently single-threaded).")
 	fmt.Println("  - In Go, flags must strictly come before arguments.")
 
+}
+
+func estimateTableRows(db *GoDB, tableName string) (float64, error) {
+	table, err := db.Catalog.GetTableMetadata(tableName)
+	if err != nil {
+		return 0, err
+	}
+	dbFile, err := db.BufferPool.StorageManager().GetDBFile(table.Oid)
+	if err != nil {
+		return 0, err
+	}
+	numPages, err := dbFile.NumPages()
+	if err != nil {
+		return 0, err
+	}
+	if numPages == 0 {
+		return 0, nil
+	}
+
+	heap, err := db.TableManager.GetTable(table.Oid)
+	if err != nil {
+		return 0, err
+	}
+
+	it, err := heap.Iterator(nil, transaction.LockModeS, make([]byte, heap.StorageSchema().BytesPerTuple()))
+	if err != nil {
+		return 0, err
+	}
+	defer it.Close()
+
+	var rows float64
+	for it.Next() {
+		rows++
+	}
+	if err := it.Error(); err != nil {
+		return 0, err
+	}
+	return rows, nil
 }
 
 func setupCommonFlags(fs *flag.FlagSet) {
@@ -329,6 +368,7 @@ func runShell(args []string) {
 
 	scanner := bufio.NewScanner(os.Stdin)
 	var queryBuffer bytes.Buffer
+	joinOptMode := false
 
 	for {
 		if queryBuffer.Len() == 0 {
@@ -355,6 +395,29 @@ func runShell(args []string) {
 				printUsage()
 				continue
 			}
+			if strings.HasPrefix(strings.ToLower(line), "joinopt") {
+				rest := strings.TrimSpace(line[len("joinopt"):])
+				if rest == "" {
+					joinOptMode = true
+					continue
+				}
+				queryBuffer.WriteString(rest)
+				queryBuffer.WriteString(" ")
+				joinOptMode = true
+				if strings.HasSuffix(rest, ";") {
+					explain, err := db.Planner.ExplainJoinOptimizer(queryBuffer.String(), bufferSize, func(tableName string) (float64, error) {
+						return estimateTableRows(db, tableName)
+					})
+					if err != nil {
+						fmt.Printf("Error: %v\n", err)
+					} else {
+						fmt.Print(explain)
+					}
+					queryBuffer.Reset()
+					joinOptMode = false
+				}
+				continue
+			}
 		}
 
 		queryBuffer.WriteString(line)
@@ -362,11 +425,23 @@ func runShell(args []string) {
 
 		if strings.HasSuffix(line, ";") {
 			fullQuery := queryBuffer.String()
-			err := executeStatement(db, fullQuery, false, *explain)
-			if err != nil {
-				fmt.Printf("Error: %v\n", err)
+			if joinOptMode {
+				explain, err := db.Planner.ExplainJoinOptimizer(fullQuery, bufferSize, func(tableName string) (float64, error) {
+					return estimateTableRows(db, tableName)
+				})
+				if err != nil {
+					fmt.Printf("Error: %v\n", err)
+				} else {
+					fmt.Print(explain)
+				}
+			} else {
+				err := executeStatement(db, fullQuery, false, *explain)
+				if err != nil {
+					fmt.Printf("Error: %v\n", err)
+				}
 			}
 			queryBuffer.Reset()
+			joinOptMode = false
 		}
 	}
 }
@@ -426,12 +501,26 @@ func executeStatement(db *GoDB, sql string, silent bool, explain bool) error {
 	}
 
 	if !silent {
+		printJoinCost(db, sql)
 		duration := time.Since(start)
 		if count > 0 || duration > time.Millisecond*10 {
 			fmt.Printf("(%d rows) [%v]\n", count, duration)
 		}
 	}
 	return nil
+}
+
+func printJoinCost(db *GoDB, sql string) {
+	cost, ok, err := db.Planner.EstimateJoinOptimizerCost(sql, bufferSize, func(tableName string) (float64, error) {
+		return estimateTableRows(db, tableName)
+	})
+	if err != nil {
+		fmt.Printf("Estimated join cost: unavailable (%v)\n", err)
+		return
+	}
+	if ok {
+		fmt.Printf("Estimated join cost: %.2f\n", cost)
+	}
 }
 
 func projectionHeaders(proj *planner.ProjectionNode) []string {

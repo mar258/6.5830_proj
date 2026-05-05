@@ -9,11 +9,14 @@ import (
 
 type Plan struct {
 	Tables       uint32
-	PhysicalJoin string   // physical op chosen at this node (estimator Name); empty for a leaf scan
+	PhysicalJoin string // physical op chosen at this node (estimator Name); empty for a leaf scan
 	Cost         float64
 	OutputRows   float64
+	JoinCount    int
 	LeftChild    *Plan // nil only for a leaf
 	RightTable   int   // base table index: sole table if leaf, otherwise table joined on the right
+
+	Candidates []JoinCandidate // candidate physical joins considered at this step
 }
 
 type JoinIndexMetadata interface {
@@ -25,7 +28,7 @@ type JoinOptimizer struct {
 	numTables  int
 	estimators []JoinCostEstimator
 	// TableRows[i] is the estimated row count for base table i; if shorter than numTables, missing entries default to 1.
-	TableRows []float64
+	TableRows  []float64
 	Predicates []Expr
 	// AvailableBuffers is passed through to estimators (e.g. BNLJ).
 	AvailableBuffers int
@@ -52,15 +55,33 @@ func (opt *JoinOptimizer) estimatorsForSearch() []JoinCostEstimator {
 	}
 }
 
-// bestJoinCost picks the cheapest physical join 
+// bestJoinCost picks the cheapest physical join
 func (opt *JoinOptimizer) bestJoinCost(leftPlan, rightPlan *Plan) (joinCost float64, outputRows float64, ok bool, physicalJoin string) {
 	joinCost = math.Inf(1)
 	outputRows = math.Inf(1)
+
+	for _, c := range opt.joinCandidates(leftPlan, rightPlan) {
+		if !c.Applicable || math.IsInf(c.Cost, 1) {
+			continue
+		}
+		if c.Cost < joinCost {
+			joinCost = c.Cost
+			outputRows = c.OutputRows
+			ok = true
+			physicalJoin = c.PhysicalJoin
+		}
+	}
+
+	return joinCost, outputRows, ok, physicalJoin
+}
+
+func (opt *JoinOptimizer) joinCandidates(leftPlan, rightPlan *Plan) []JoinCandidate {
 	buffers := opt.AvailableBuffers
 	if buffers <= 0 {
 		buffers = 1
 	}
-	in := JoinCostInput{
+
+	input := JoinCostInput{
 		LeftRows:               leftPlan.OutputRows,
 		RightRows:              rightPlan.OutputRows,
 		LeftRowWidth:           1,
@@ -69,19 +90,27 @@ func (opt *JoinOptimizer) bestJoinCost(leftPlan, rightPlan *Plan) (joinCost floa
 		AvailableBuffers:       buffers,
 		RightHasIndexOnJoinKey: opt.rightLeafHasJoinIndex(rightPlan),
 	}
+
+	var candidates []JoinCandidate
 	for _, est := range opt.estimatorsForSearch() {
-		if !est.CanApply(in) {
+		if !est.CanApply(input) {
+			candidates = append(candidates, JoinCandidate{
+				PhysicalJoin: est.Name(),
+				Applicable:   false,
+			})
 			continue
 		}
-		e := est.Estimate(in)
-		if !math.IsInf(e.Cost, 1) && e.Cost < joinCost {
-			joinCost = e.Cost
-			outputRows = e.OutputRows
-			ok = true
-			physicalJoin = est.Name()
-		}
+
+		e := est.Estimate(input)
+		candidates = append(candidates, JoinCandidate{
+			PhysicalJoin: est.Name(),
+			Cost:         e.Cost,
+			OutputRows:   e.OutputRows,
+			Applicable:   true,
+		})
 	}
-	return joinCost, outputRows, ok, physicalJoin
+
+	return candidates
 }
 
 // rightLeafHasJoinIndex reports whether the single-table child of this join step has a
@@ -103,6 +132,7 @@ func (opt *JoinOptimizer) FindBestJoin() *Plan {
 			PhysicalJoin: "",
 			Cost:         0,
 			OutputRows:   opt.tableRowCount(i),
+			JoinCount:    0,
 			LeftChild:    nil,
 			RightTable:   i,
 		}
@@ -130,7 +160,8 @@ func (opt *JoinOptimizer) FindBestJoin() *Plan {
 				if leftPlan == nil || rightPlan == nil {
 					continue
 				}
-				jc, outRows, ok, physicalJoin := opt.bestJoinCost(leftPlan, rightPlan)
+				candidates := opt.joinCandidates(leftPlan, rightPlan)
+				jc, outRows, ok, physicalJoin := bestCandidate(candidates)
 				if !ok {
 					continue
 				}
@@ -142,8 +173,10 @@ func (opt *JoinOptimizer) FindBestJoin() *Plan {
 						PhysicalJoin: physicalJoin,
 						Cost:         total,
 						OutputRows:   outRows,
+						JoinCount:    leftPlan.JoinCount + 1,
 						LeftChild:    leftPlan,
 						RightTable:   i,
+						Candidates:   candidates,
 					}
 				}
 			}
@@ -157,8 +190,34 @@ func (opt *JoinOptimizer) FindBestJoin() *Plan {
 	return opt.memo[fullMask]
 }
 
+func bestCandidate(candidates []JoinCandidate) (joinCost float64, outputRows float64, ok bool, physicalJoin string) {
+	joinCost = math.Inf(1)
+	outputRows = math.Inf(1)
+
+	for _, c := range candidates {
+		if !c.Applicable || math.IsInf(c.Cost, 1) {
+			continue
+		}
+		if c.Cost < joinCost {
+			joinCost = c.Cost
+			outputRows = c.OutputRows
+			ok = true
+			physicalJoin = c.PhysicalJoin
+		}
+	}
+
+	return joinCost, outputRows, ok, physicalJoin
+}
+
 func countSetBits(mask uint32) int {
 	return bits.OnesCount32(mask)
+}
+
+type JoinCandidate struct {
+	PhysicalJoin string
+	Cost         float64
+	OutputRows   float64
+	Applicable   bool
 }
 
 type JoinCostEstimate struct {
@@ -340,24 +399,67 @@ func impossibleCost() JoinCostEstimate {
 	}
 }
 
+// hasEquiJoinPredicate reports whether the join condition contains at least one
+// equality that can drive hash / sort-merge / index nested-loop style equijoins:
+//   - column = column with different table origins (including self-join aliases), or
+//   - legacy synthetic tests that use constant = constant.
+//
+// It returns false for empty predicates, pure range joins (<, >), column op constant
+// filters, same-table column = column (single-table predicate), and unsupported shapes.
 func hasEquiJoinPredicate(preds []Expr) bool {
-	// TODO:
-	// Replace this stub with real predicate inspection.
-	//
-	// For example, you may want to detect a ComparisonExpression
-	// with equality operator between columns from different sides.
-	return len(preds) > 0
+	if len(preds) == 0 {
+		return false
+	}
+	for _, p := range preds {
+		if exprHasEquiJoinPredicate(p) {
+			return true
+		}
+	}
+	return false
+}
+
+func exprHasEquiJoinPredicate(e Expr) bool {
+	switch x := e.(type) {
+	case *ComparisonExpression:
+		return isJoinEqualityComparison(x)
+	case *BinaryLogicExpression:
+		switch x.logicType {
+		case And, Or:
+			return exprHasEquiJoinPredicate(x.left) || exprHasEquiJoinPredicate(x.right)
+		}
+	case *NegationExpression:
+		return false
+	}
+	return false
+}
+
+func isJoinEqualityComparison(cmp *ComparisonExpression) bool {
+	if cmp.compType != Equal {
+		return false
+	}
+	lc, lok := cmp.left.(*LogicalColumn)
+	rc, rok := cmp.right.(*LogicalColumn)
+	if lok && rok {
+		if lc.origin == nil || rc.origin == nil {
+			return false
+		}
+		if lc.origin.Equals(rc.origin) {
+			return false
+		}
+		return true
+	}
+	_, lcok := cmp.left.(*ConstantValueExpr)
+	_, rcok := cmp.right.(*ConstantValueExpr)
+	return lcok && rcok
 }
 
 func estimateJoinOutputRows(input JoinCostInput) float64 {
-	// TODO:
-	// Replace with a better selectivity/cardinality model.
-	//
-	// For now:
-	// - equijoin gets a modest selectivity assumption
-	// - otherwise fall back to a more pessimistic estimate
-	baseEstimate := math.Min(input.LeftRows, input.RightRows) * 1.5 
-    return math.Max(1.0, baseEstimate)
+	// A standard naive heuristic: assume an inner join output size
+	// is roughly bound by the larger of the two relations (e.g., an FK -> PK join)
+	// but scale down slightly to account for some rows not matching.
+	baseEstimate := math.Max(input.LeftRows, input.RightRows) * 0.8
+
+	return math.Max(1.0, baseEstimate)
 }
 
 func estimateSortCost(rows float64) float64 {

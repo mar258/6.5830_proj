@@ -3,6 +3,7 @@ package planner
 import (
 	"fmt"
 	"math"
+	"sort"
 	"testing"
 
 	"mit.edu/dsg/godb/catalog"
@@ -97,6 +98,35 @@ func newEvalNTableChainLogicalJoinTB(tb testing.TB, cat *catalog.Catalog, n int)
 		)
 		plan = NewLogicalJoinNode(plan, scans[i], []Expr{cond}, Inner)
 	}
+	return plan
+}
+
+func newEvalOrderedChainLogicalJoinTB(tb testing.TB, cat *catalog.Catalog, tableOrder []int) LogicalPlanNode {
+	if len(tableOrder) < 2 {
+		tb.Fatal("tableOrder must have length >= 2")
+	}
+
+	refs := make([]*TableRef, len(tableOrder))
+	scans := make([]*LogicalScanNode, len(tableOrder))
+	for i, tableIdx := range tableOrder {
+		tmeta, err := cat.GetTableMetadata(fmt.Sprintf("eval_t%d", tableIdx))
+		if err != nil {
+			tb.Fatalf("GetTableMetadata eval_t%d: %v", tableIdx, err)
+		}
+		refs[i] = makeTableRef(tmeta, fmt.Sprintf("t%d", tableIdx), uint64(800+i))
+		scans[i] = NewLogicalScanNode(refs[i], false)
+	}
+
+	var plan LogicalPlanNode = scans[0]
+	for i := 1; i < len(scans); i++ {
+		cond := NewComparisonExpression(
+			findCol(refs[i-1], "k"),
+			findCol(refs[i], "id"),
+			Equal,
+		)
+		plan = NewLogicalJoinNode(plan, scans[i], []Expr{cond}, Inner)
+	}
+
 	return plan
 }
 
@@ -260,7 +290,19 @@ func BenchmarkEvalJoinChainSkewedSizesIOCost(b *testing.B) {
 	}
 
 	cat := newEvalNTableChainCatalogTB(b, n)
-	logicalRoot := newEvalNTableChainLogicalJoinTB(b, cat, n)
+	ascendingOrder := make([]int, n)
+	for i := range ascendingOrder {
+		ascendingOrder[i] = i
+	}
+	sort.Slice(ascendingOrder, func(i, j int) bool {
+		return evalJoinSkewedSizes[ascendingOrder[i]] < evalJoinSkewedSizes[ascendingOrder[j]]
+	})
+	descendingOrder := make([]int, n)
+	for i := range descendingOrder {
+		descendingOrder[i] = ascendingOrder[n-1-i]
+	}
+	logicalRootAscendingToDescending := newEvalOrderedChainLogicalJoinTB(b, cat, ascendingOrder)
+	logicalRootDescendingToAscending := newEvalOrderedChainLogicalJoinTB(b, cat, descendingOrder)
 	builder := NewPhysicalPlanBuilder(cat, physicalRulesJoinEval())
 	rowByOID := evalRowLookupForChainTB(b, cat, evalJoinSkewedSizes)
 
@@ -276,11 +318,25 @@ func BenchmarkEvalJoinChainSkewedSizesIOCost(b *testing.B) {
 		},
 	}
 
-	b.Run("RuleBasedEstimatedIOCost", func(b *testing.B) {
+	b.Run("RuleBasedEstimatedIOCostSmallToLarge", func(b *testing.B) {
 		b.ReportAllocs()
 		var total float64
 		for b.Loop() {
-			p, err := builder.Build(logicalRoot)
+			p, err := builder.Build(logicalRootAscendingToDescending)
+			if err != nil {
+				b.Fatal(err)
+			}
+			cost, _ := estimateRuleBasedIOCost(p, rowByOID, 100)
+			total += cost
+		}
+		evalIOCostSink = total
+		b.ReportMetric(total/float64(b.N), "io_cost/op")
+	})
+	b.Run("RuleBasedEstimatedIOCostLargeToSmall", func(b *testing.B) {
+		b.ReportAllocs()
+		var total float64
+		for b.Loop() {
+			p, err := builder.Build(logicalRootDescendingToAscending)
 			if err != nil {
 				b.Fatal(err)
 			}

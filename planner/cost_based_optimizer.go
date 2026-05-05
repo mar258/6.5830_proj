@@ -9,10 +9,10 @@ import (
 
 type Plan struct {
 	Tables       uint32
-	PhysicalJoin string   // physical op chosen at this node (estimator Name); empty for a leaf scan
+	PhysicalJoin string // physical op chosen at this node (estimator Name); empty for a leaf scan
 	Cost         float64
 	OutputRows   float64
-	JoinCount	 int
+	JoinCount    int
 	LeftChild    *Plan // nil only for a leaf
 	RightTable   int   // base table index: sole table if leaf, otherwise table joined on the right
 
@@ -28,7 +28,7 @@ type JoinOptimizer struct {
 	numTables  int
 	estimators []JoinCostEstimator
 	// TableRows[i] is the estimated row count for base table i; if shorter than numTables, missing entries default to 1.
-	TableRows []float64
+	TableRows  []float64
 	Predicates []Expr
 	// AvailableBuffers is passed through to estimators (e.g. BNLJ).
 	AvailableBuffers int
@@ -176,7 +176,7 @@ func (opt *JoinOptimizer) FindBestJoin() *Plan {
 						JoinCount:    leftPlan.JoinCount + 1,
 						LeftChild:    leftPlan,
 						RightTable:   i,
-						Candidates: candidates,
+						Candidates:   candidates,
 					}
 				}
 			}
@@ -399,21 +399,67 @@ func impossibleCost() JoinCostEstimate {
 	}
 }
 
+// hasEquiJoinPredicate reports whether the join condition contains at least one
+// equality that can drive hash / sort-merge / index nested-loop style equijoins:
+//   - column = column with different table origins (including self-join aliases), or
+//   - legacy synthetic tests that use constant = constant.
+//
+// It returns false for empty predicates, pure range joins (<, >), column op constant
+// filters, same-table column = column (single-table predicate), and unsupported shapes.
 func hasEquiJoinPredicate(preds []Expr) bool {
-	// Prototype assumption:
-	// The optimizer is currently passed only join predicates, and synthetic
-	// test inputs use equality predicates. A full integration should inspect
-	// Expr structure and verify that the predicate is column = column.
-	return len(preds) > 0
+	if len(preds) == 0 {
+		return false
+	}
+	for _, p := range preds {
+		if exprHasEquiJoinPredicate(p) {
+			return true
+		}
+	}
+	return false
+}
+
+func exprHasEquiJoinPredicate(e Expr) bool {
+	switch x := e.(type) {
+	case *ComparisonExpression:
+		return isJoinEqualityComparison(x)
+	case *BinaryLogicExpression:
+		switch x.logicType {
+		case And, Or:
+			return exprHasEquiJoinPredicate(x.left) || exprHasEquiJoinPredicate(x.right)
+		}
+	case *NegationExpression:
+		return false
+	}
+	return false
+}
+
+func isJoinEqualityComparison(cmp *ComparisonExpression) bool {
+	if cmp.compType != Equal {
+		return false
+	}
+	lc, lok := cmp.left.(*LogicalColumn)
+	rc, rok := cmp.right.(*LogicalColumn)
+	if lok && rok {
+		if lc.origin == nil || rc.origin == nil {
+			return false
+		}
+		if lc.origin.Equals(rc.origin) {
+			return false
+		}
+		return true
+	}
+	_, lcok := cmp.left.(*ConstantValueExpr)
+	_, rcok := cmp.right.(*ConstantValueExpr)
+	return lcok && rcok
 }
 
 func estimateJoinOutputRows(input JoinCostInput) float64 {
-	// A standard naive heuristic: assume an inner join output size 
-    // is roughly bound by the larger of the two relations (e.g., an FK -> PK join)
-    // but scale down slightly to account for some rows not matching.
-    baseEstimate := math.Max(input.LeftRows, input.RightRows) * 0.8
-    
-    return math.Max(1.0, baseEstimate)
+	// A standard naive heuristic: assume an inner join output size
+	// is roughly bound by the larger of the two relations (e.g., an FK -> PK join)
+	// but scale down slightly to account for some rows not matching.
+	baseEstimate := math.Max(input.LeftRows, input.RightRows) * 0.8
+
+	return math.Max(1.0, baseEstimate)
 }
 
 func estimateSortCost(rows float64) float64 {

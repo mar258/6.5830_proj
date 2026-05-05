@@ -4,7 +4,8 @@ import (
 	"fmt"
 	"math"
 	"math/bits"
-	// "mit.edu/dsg/godb/common"
+
+	"mit.edu/dsg/godb/common"
 )
 
 type Plan struct {
@@ -34,6 +35,7 @@ type JoinOptimizer struct {
 	AvailableBuffers int
 	// IndexMeta wires catalog/index info into join costing; optional.
 	IndexMeta JoinIndexMetadata
+	AssumeSortedJoinInputs bool
 }
 
 func (opt *JoinOptimizer) tableRowCount(tableIdx int) float64 {
@@ -89,6 +91,8 @@ func (opt *JoinOptimizer) joinCandidates(leftPlan, rightPlan *Plan) []JoinCandid
 		Predicates:             opt.Predicates,
 		AvailableBuffers:       buffers,
 		RightHasIndexOnJoinKey: opt.rightLeafHasJoinIndex(rightPlan),
+		LeftHasOrdering:        opt.AssumeSortedJoinInputs,
+		RightHasOrdering:       opt.AssumeSortedJoinInputs,
 	}
 
 	var candidates []JoinCandidate
@@ -479,4 +483,149 @@ func debugJoinCost(name string, input JoinCostInput, est JoinCostEstimate) strin
 		est.Cost,
 		est.OutputRows,
 	)
+}
+
+
+// USED FOR CALCULATING COST OF RBO in cost_based_optimizer_eval
+// unwrapPhysicalPlanDecorators strips planner decoration nodes so costing sees scans and joins.
+func unwrapPhysicalPlanDecorators(node PlanNode) PlanNode {
+	for {
+		switch n := node.(type) {
+		case *ProjectionNode:
+			node = n.Child
+		case *FilterNode:
+			node = n.Child
+		case *MaterializeNode:
+			node = n.Child
+		default:
+			return node
+		}
+	}
+}
+
+func physicalLeafTableOid(node PlanNode) (common.ObjectID, bool) {
+	switch n := unwrapPhysicalPlanDecorators(node).(type) {
+	case *SeqScanNode:
+		return n.TableOid, true
+	case *IndexScanNode:
+		return n.TableOid, true
+	case *IndexLookupNode:
+		return n.TableOid, true
+	default:
+		return 0, false
+	}
+}
+
+func physicalRightLeafHasJoinIndex(right PlanNode, predicates []Expr, indexMeta JoinIndexMetadata, oidToBaseTableIdx map[common.ObjectID]int) bool {
+	if indexMeta == nil || oidToBaseTableIdx == nil {
+		return false
+	}
+	oid, ok := physicalLeafTableOid(right)
+	if !ok {
+		return false
+	}
+	ti, ok := oidToBaseTableIdx[oid]
+	if !ok {
+		return false
+	}
+	return indexMeta.InnerHasJoinIndex(ti, predicates)
+}
+
+func joinCostInputPhysical(leftRows, rightRows float64, predicates []Expr, availableBuffers int, indexMeta JoinIndexMetadata, oidToBaseTableIdx map[common.ObjectID]int, right PlanNode, inljInnerOid common.ObjectID, inljInnerKnown bool) JoinCostInput {
+	input := JoinCostInput{
+		LeftRows:         leftRows,
+		RightRows:        rightRows,
+		LeftRowWidth:     1,
+		RightRowWidth:    1,
+		Predicates:       predicates,
+		AvailableBuffers: availableBuffers,
+	}
+	if inljInnerKnown {
+		if ti, ok := oidToBaseTableIdx[inljInnerOid]; ok && indexMeta != nil {
+			input.RightHasIndexOnJoinKey = indexMeta.InnerHasJoinIndex(ti, predicates)
+		}
+	} else {
+		input.RightHasIndexOnJoinKey = physicalRightLeafHasJoinIndex(right, predicates, indexMeta, oidToBaseTableIdx)
+	}
+	return input
+}
+
+// EstimatePhysicalPlanJoinOptimizerCost sums join costs the same way as JoinOptimizer.FindBestJoin:
+// base-table leaves contribute cost 0 with cardinality from rowCountsByOID; each physical join node
+// adds the matching JoinCostEstimator cost (hash / sort-merge / block NL / index NL).
+//
+// predicates and indexMeta should match the JoinOptimizer inputs used for comparison.
+//
+// oidToBaseTableIdx maps table OID -> scan ordinal i (same order as collectJoinOptimizerInputs /
+// newCatalogJoinIndexMeta). It must not use raw eval_t0..eval_{n-1} positions when the logical plan
+// permutes tables — InnerHasJoinIndex(i) indexes catalogJoinIndexMeta.tableByIdx[i] by scan order.
+func EstimatePhysicalPlanJoinOptimizerCost(root PlanNode, rowCountsByOID map[common.ObjectID]float64, predicates []Expr, availableBuffers int, indexMeta JoinIndexMetadata, oidToBaseTableIdx map[common.ObjectID]int) (cost float64, outputRows float64) {
+	buffers := availableBuffers
+	if buffers <= 0 {
+		buffers = 1
+	}
+	return estimatePhysicalPlanJoinOptimizerCost(root, rowCountsByOID, predicates, buffers, indexMeta, oidToBaseTableIdx)
+}
+
+func estimatePhysicalPlanJoinOptimizerCost(node PlanNode, rowCountsByOID map[common.ObjectID]float64, predicates []Expr, availableBuffers int, indexMeta JoinIndexMetadata, oidToBaseTableIdx map[common.ObjectID]int) (cost float64, outputRows float64) {
+	node = unwrapPhysicalPlanDecorators(node)
+
+	switch n := node.(type) {
+	case *SeqScanNode:
+		r := tableRowsFromJoinStats(rowCountsByOID, n.TableOid)
+		return 0, r
+	case *IndexScanNode:
+		r := tableRowsFromJoinStats(rowCountsByOID, n.TableOid)
+		return 0, r
+	case *IndexLookupNode:
+		r := tableRowsFromJoinStats(rowCountsByOID, n.TableOid)
+		return 0, r
+	case *HashJoinNode:
+		lc, lr := estimatePhysicalPlanJoinOptimizerCost(n.Left, rowCountsByOID, predicates, availableBuffers, indexMeta, oidToBaseTableIdx)
+		rc, rr := estimatePhysicalPlanJoinOptimizerCost(n.Right, rowCountsByOID, predicates, availableBuffers, indexMeta, oidToBaseTableIdx)
+		in := joinCostInputPhysical(lr, rr, predicates, availableBuffers, indexMeta, oidToBaseTableIdx, n.Right, 0, false)
+		est := (&HashJoinCostEstimator{}).Estimate(in)
+		return lc + rc + est.Cost, est.OutputRows
+	case *SortMergeJoinNode:
+		lc, lr := estimatePhysicalPlanJoinOptimizerCost(n.Left, rowCountsByOID, predicates, availableBuffers, indexMeta, oidToBaseTableIdx)
+		rc, rr := estimatePhysicalPlanJoinOptimizerCost(n.Right, rowCountsByOID, predicates, availableBuffers, indexMeta, oidToBaseTableIdx)
+		in := joinCostInputPhysical(lr, rr, predicates, availableBuffers, indexMeta, oidToBaseTableIdx, n.Right, 0, false)
+		est := (&SortMergeJoinCostEstimator{}).Estimate(in)
+		return lc + rc + est.Cost, est.OutputRows
+	case *NestedLoopJoinNode:
+		lc, lr := estimatePhysicalPlanJoinOptimizerCost(n.Left, rowCountsByOID, predicates, availableBuffers, indexMeta, oidToBaseTableIdx)
+		rc, rr := estimatePhysicalPlanJoinOptimizerCost(n.Right, rowCountsByOID, predicates, availableBuffers, indexMeta, oidToBaseTableIdx)
+		in := joinCostInputPhysical(lr, rr, predicates, availableBuffers, indexMeta, oidToBaseTableIdx, n.Right, 0, false)
+		est := (&BlockNestedLoopJoinCostEstimator{}).Estimate(in)
+		return lc + rc + est.Cost, est.OutputRows
+	case *IndexNestedLoopJoinNode:
+		lc, lr := estimatePhysicalPlanJoinOptimizerCost(n.Left, rowCountsByOID, predicates, availableBuffers, indexMeta, oidToBaseTableIdx)
+		rr := tableRowsFromJoinStats(rowCountsByOID, n.RightTableOid)
+		in := joinCostInputPhysical(lr, rr, predicates, availableBuffers, indexMeta, oidToBaseTableIdx, nil, n.RightTableOid, true)
+		est := (&IndexNestedLoopJoinCostEstimator{}).Estimate(in)
+		return lc + est.Cost, est.OutputRows
+	default:
+		children := node.Children()
+		if len(children) == 0 {
+			return 0, 1
+		}
+		var total float64
+		var maxRows float64
+		for _, ch := range children {
+			c, r := estimatePhysicalPlanJoinOptimizerCost(ch, rowCountsByOID, predicates, availableBuffers, indexMeta, oidToBaseTableIdx)
+			total += c
+			if r > maxRows {
+				maxRows = r
+			}
+		}
+		return total, math.Max(1.0, maxRows)
+	}
+}
+
+func tableRowsFromJoinStats(rowCountsByOID map[common.ObjectID]float64, oid common.ObjectID) float64 {
+	r := rowCountsByOID[oid]
+	if r <= 0 {
+		return 1
+	}
+	return r
 }

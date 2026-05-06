@@ -298,8 +298,38 @@ func syntheticTest4RowCountsFromCSVs(tb testing.TB) []float64 {
 
 var evalJoinCBOMixCompareVerboseOnce sync.Once
 
-// benchRows150k is the estimated row count per base table for join-chain eval benchmarks.
-const benchRows150k = 150_000
+// test2 (synthetic_data/test2/table_0..6.csv) row counts, matching data loaded into godb via
+// test2_chain_catalog.json. Cached so benchmarks do not rescan large CSVs repeatedly.
+var (
+	test2ChainStatsOnce    sync.Once
+	test2ChainStatsCache   []float64
+	test2ChainStatsLoadErr error
+)
+
+func test2ChainTableRowCountsFromCSVs(tb testing.TB) []float64 {
+	tb.Helper()
+	test2ChainStatsOnce.Do(func() {
+		dir := filepath.Join("..", "synthetic_data", "test2")
+		out := make([]float64, 7)
+		for i := range out {
+			path := filepath.Join(dir, fmt.Sprintf("table_%d.csv", i))
+			n, err := countCSVDataRows(path)
+			if err != nil {
+				test2ChainStatsLoadErr = err
+				return
+			}
+			out[i] = n
+		}
+		test2ChainStatsCache = out
+	})
+	if test2ChainStatsLoadErr != nil {
+		tb.Fatalf("synthetic_data/test2 stats: %v", test2ChainStatsLoadErr)
+	}
+	return test2ChainStatsCache
+}
+
+// chainBenchCompareLogged suppresses duplicate evalLogJoinCompare output when a sub-benchmark body runs more than once.
+var chainBenchCompareLogged sync.Map
 
 // TestEvalJoinTwoTableOuter1kInner10k exercises the eval harness on a single equi-join with
 // asymmetric cardinalities: outer (left / eval_t0) 1k rows, inner (right / eval_t1) 10k rows.
@@ -364,24 +394,31 @@ func TestEvalJoinTwoTableOuter1kInner10k(t *testing.T) {
 		planCost, collectPhysicalJoinOperators(p), best.Cost, collectCBOJoinOperators(best), best)
 }
 
-// TestEvalJoinChain150kTablesIOCost logs join-estimator costs and join operators for the rule-built
-// plan vs CBO for each chain length (same estimator definitions as FindBestJoin).
-func TestEvalJoinChain150kTablesIOCost(t *testing.T) {
+// BenchmarkEvalJoinChain150kTablesIOCost measures FindBestJoin for chain lengths 2–7 using cardinality
+// estimates from synthetic_data/test2/table_*.csv (same row counts as table_0..table_6 loaded into godb).
+//
+// With -bench -v, prints evalLogJoinCompare for each sub-benchmark: original joining (PhysicalPlanBuilder +
+// catalog join-index meta) vs CBO (same estimators).
+func BenchmarkEvalJoinChain150kTablesIOCost(b *testing.B) {
+	allStats := test2ChainTableRowCountsFromCSVs(b)
 	for _, n := range []int{2, 3, 4, 5, 6, 7} {
 		n := n
-		t.Run(fmt.Sprintf("tables_%02d", n), func(t *testing.T) {
-			cat := newEvalNTableChainCatalogTB(t, n)
-			logicalRoot := newEvalNTableChainLogicalJoinTB(t, cat, n)
+		b.Run(fmt.Sprintf("tables_%02d", n), func(b *testing.B) {
+			tableRows := make([]float64, n)
+			copy(tableRows, allStats[:n])
+
+			cat := newEvalNTableChainCatalogTB(b, n)
+			logicalRoot := newEvalNTableChainLogicalJoinTB(b, cat, n)
 			builder := NewPhysicalPlanBuilder(cat, physicalRulesJoinEval())
 
-			tableRows := make([]float64, n)
-			for i := range tableRows {
-				tableRows[i] = benchRows150k
-			}
-			rowByOID := evalRowLookupForChainTB(t, cat, tableRows)
+			rowByOID := evalRowLookupForChainTB(b, cat, tableRows)
 			scans, joinPredicates := collectJoinOptimizerInputs(logicalRoot)
+			if len(joinPredicates) == 0 {
+				b.Fatal("expected join predicates")
+			}
 			indexMeta := newCatalogJoinIndexMeta(scans)
 			oidToScan := evalOidToScanOrdinal(scans)
+
 			cbo := &JoinOptimizer{
 				numTables:        n,
 				TableRows:        tableRows,
@@ -398,15 +435,26 @@ func TestEvalJoinChain150kTablesIOCost(t *testing.T) {
 
 			p, err := builder.Build(logicalRoot)
 			if err != nil {
-				t.Fatalf("Build: %v", err)
+				b.Fatalf("Build: %v", err)
 			}
 			planCost, _ := EstimatePhysicalPlanJoinOptimizerCost(p, rowByOID, joinPredicates, 100, indexMeta, oidToScan)
 			best := cbo.FindBestJoin()
 			if best == nil {
-				t.Fatal("nil CBO plan")
+				b.Fatal("nil CBO plan")
 			}
-			evalLogJoinCompare(t, fmt.Sprintf("── %d-table chain (≈150k rows/table) ──", n),
-				planCost, collectPhysicalJoinOperators(p), best.Cost, collectCBOJoinOperators(best), best)
+			if testing.Verbose() {
+				key := fmt.Sprintf("EvalJoinChain150kTablesIOCost/tables_%02d", n)
+				if _, loaded := chainBenchCompareLogged.LoadOrStore(key, true); !loaded {
+					evalLogJoinCompare(b, fmt.Sprintf("── %d-table chain (test2 CSV row counts = godb table_*) ──", n),
+						planCost, collectPhysicalJoinOperators(p), best.Cost, collectCBOJoinOperators(best), best)
+				}
+			}
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				_ = cbo.FindBestJoin()
+			}
 		})
 	}
 }

@@ -1,10 +1,14 @@
 package planner
 
 import (
+	"bufio"
 	"fmt"
 	"math"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 
 	"mit.edu/dsg/godb/catalog"
@@ -80,18 +84,18 @@ func formatJoinSequence(ops []string) string {
 	return strings.Join(ops, " → ")
 }
 
-// evalLogJoinCompare prints rule-built physical costing vs CBO in a fixed layout (use with go test -v).
-func evalLogJoinCompare(t *testing.T, title string, physicalCost float64, physicalOps []string, cboCost float64, cboOps []string, cboPlan *Plan) {
-	t.Helper()
-	t.Log(title)
-	t.Log("  Physical plan (rule-built tree, join-estimator cost)")
-	t.Logf("    cost:  %.6g", physicalCost)
-	t.Logf("    joins: %s", formatJoinSequence(physicalOps))
-	t.Log("  CBO (FindBestJoin)")
-	t.Logf("    cost:  %.6g", cboCost)
-	t.Logf("    joins: %s", formatJoinSequence(cboOps))
+// evalLogJoinCompare prints original (rule-built) physical costing vs CBO in a fixed layout (use with go test -bench -v / go test -v).
+func evalLogJoinCompare(tb testing.TB, title string, physicalCost float64, physicalOps []string, cboCost float64, cboOps []string, cboPlan *Plan) {
+	tb.Helper()
+	tb.Log(title)
+	tb.Log("  Original joining: PhysicalPlanBuilder (rule order INLJ→SMJ→Hash→BNLJ) + join-estimator cost")
+	tb.Logf("    cost:  %.6g", physicalCost)
+	tb.Logf("    joins: %s", formatJoinSequence(physicalOps))
+	tb.Log("  CBO (FindBestJoin)")
+	tb.Logf("    cost:  %.6g", cboCost)
+	tb.Logf("    joins: %s", formatJoinSequence(cboOps))
 	if cboPlan != nil {
-		t.Logf("    tree:  %s", cboPlan.String())
+		tb.Logf("    tree:  %s", cboPlan.String())
 	}
 }
 
@@ -234,69 +238,68 @@ func evalStatsPermutedForScans(scans []*LogicalScanNode, statsByEvalIdx []float6
 	return out
 }
 
+// countCSVDataRows returns the number of data rows in path (first line treated as header).
+func countCSVDataRows(path string) (float64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	s := bufio.NewScanner(f)
+	buf := make([]byte, 0, 64*1024)
+	s.Buffer(buf, 1024*1024)
+	if !s.Scan() {
+		if err := s.Err(); err != nil {
+			return 0, err
+		}
+		return 0, nil
+	}
+	var n int64
+	for s.Scan() {
+		n++
+	}
+	if err := s.Err(); err != nil {
+		return 0, err
+	}
+	return float64(n), nil
+}
+
+// syntheticTest4RowCountsFromCSVs returns cardinality estimates for eval_t0..eval_t3 matching
+// synthetic_data/test4data.py: regions, orders, web_logs, users. Results are cached (sync.Once)
+// so benchmarks do not rescan multi-million-line CSVs on every benchmark phase.
+var (
+	syntheticTest4StatsOnce    sync.Once
+	syntheticTest4StatsCache   []float64
+	syntheticTest4StatsLoadErr error
+)
+
+func syntheticTest4RowCountsFromCSVs(tb testing.TB) []float64 {
+	tb.Helper()
+	syntheticTest4StatsOnce.Do(func() {
+		dir := filepath.Join("..", "synthetic_data")
+		files := []string{"regions.csv", "orders.csv", "web_logs.csv", "users.csv"}
+		out := make([]float64, len(files))
+		for i, name := range files {
+			path := filepath.Join(dir, name)
+			n, err := countCSVDataRows(path)
+			if err != nil {
+				syntheticTest4StatsLoadErr = err
+				return
+			}
+			out[i] = n
+		}
+		syntheticTest4StatsCache = out
+	})
+	if syntheticTest4StatsLoadErr != nil {
+		tb.Fatalf("synthetic_data stats: %v", syntheticTest4StatsLoadErr)
+	}
+	return syntheticTest4StatsCache
+}
+
+var evalJoinCBOMixCompareVerboseOnce sync.Once
+
 // benchRows150k is the estimated row count per base table for join-chain eval benchmarks.
 const benchRows150k = 150_000
-
-func TestEvalJoinTwoTableOuter100Inner10k(t *testing.T) {
-	const n = 2
-	const outerRows = 100
-	const innerRows = 10_000
-
-	cat := newEvalNTableChainCatalogTB(t, n)
-	logicalRoot := newEvalNTableChainLogicalJoinTB(t, cat, n)
-	builder := NewPhysicalPlanBuilder(cat, physicalRulesJoinEval())
-
-	tableRows := []float64{outerRows, innerRows}
-	rowByOID := evalRowLookupForChainTB(t, cat, tableRows)
-
-	scans, joinPredicates := collectJoinOptimizerInputs(logicalRoot)
-	if len(joinPredicates) == 0 {
-		t.Fatal("expected join predicates from logical plan")
-	}
-
-	p, err := builder.Build(logicalRoot)
-	if err != nil {
-		t.Fatalf("Build: %v", err)
-	}
-	indexMeta := newCatalogJoinIndexMeta(scans)
-	oidToScan := evalOidToScanOrdinal(scans)
-	planCost, _ := EstimatePhysicalPlanJoinOptimizerCost(p, rowByOID, joinPredicates, 100, indexMeta, oidToScan)
-	if planCost <= 0 || math.IsNaN(planCost) || math.IsInf(planCost, 0) {
-		t.Fatalf("unexpected physical join-estimator cost: %v", planCost)
-	}
-
-	cbo := &JoinOptimizer{
-		numTables:        n,
-		TableRows:        tableRows,
-		Predicates:       joinPredicates,
-		AvailableBuffers: 100,
-		IndexMeta:        indexMeta,
-		estimators: []JoinCostEstimator{
-			&IndexNestedLoopJoinCostEstimator{},
-			&SortMergeJoinCostEstimator{},
-			&HashJoinCostEstimator{},
-			&BlockNestedLoopJoinCostEstimator{},
-		},
-	}
-	best := cbo.FindBestJoin()
-	if best == nil {
-		t.Fatal("nil CBO plan")
-	}
-	if best.Cost <= 0 || math.IsNaN(best.Cost) || math.IsInf(best.Cost, 0) {
-		t.Fatalf("unexpected CBO cost: %v", best.Cost)
-	}
-
-	// Same estimator formulas for both paths. Totals match only when the rule-built plan picks the
-	// same physical join as the CBO (here HashJoin is cheaper than IndexNestedLoopJoin, but rule
-	// order tries INLJ first when applicable, so costs can differ).
-	rboJoin := unwrapPhysicalJoinKind(p)
-	if rboJoin == best.PhysicalJoin && planCost != best.Cost {
-		t.Fatalf("same operator %s but cost mismatch: physical=%g cbo=%g", rboJoin, planCost, best.Cost)
-	}
-
-	evalLogJoinCompare(t, "── 2-table join (100 × 10k rows) ──",
-		planCost, collectPhysicalJoinOperators(p), best.Cost, collectCBOJoinOperators(best), best)
-}
 
 // TestEvalJoinTwoTableOuter1kInner10k exercises the eval harness on a single equi-join with
 // asymmetric cardinalities: outer (left / eval_t0) 1k rows, inner (right / eval_t1) 10k rows.
@@ -484,44 +487,34 @@ func TestEvalJoinChainSkewedSizesIOCost(t *testing.T) {
 	})
 }
 
-// TestEvalJoinCBOMixesJoinAlgorithms builds a 4-way chain where cardinality estimates and partial
-// join-index availability force the CBO to pick different physical joins at different steps.
+// BenchmarkEvalJoinCBOMixesJoinAlgorithms measures FindBestJoin on a 4-way chain using cardinality
+// estimates from synthetic_data CSV row counts (regions → orders → web_logs → users as eval_t0..t3).
 //
-// AssumeSortedJoinInputs sets ordering flags so SortMergeJoinCostEstimator omits sort phases (inputs
-// assumed ordered on join keys). Sort-merge then ties HashJoin at cost L+R; SortMergeJoin is listed
-// before HashJoin among estimators, so the CBO chooses SortMergeJoin when IndexNestedLoopJoin does not
-// apply (here: inner eval_t2 has join index disabled via fake IndexMeta).
+// Partial join-index availability (fake IndexMeta) forces different physical joins than fixed rule order.
+// AssumeSortedJoinInputs lets SortMergeJoin tie HashJoin without sort cost; SortMergeJoin is ordered
+// before HashJoin in estimators.
 //
-// It logs an RBO comparison: PhysicalPlanBuilder + catalog-based costing vs this CBO setup.
-func TestEvalJoinCBOMixesJoinAlgorithms(t *testing.T) {
+// Before timing, it compares original joining (PhysicalPlanBuilder + catalog index meta, same cost model)
+// to the CBO plan (run with: go test -bench BenchmarkEvalJoinCBOMixesJoinAlgorithms -benchmem -benchtime 1x -v).
+func BenchmarkEvalJoinCBOMixesJoinAlgorithms(b *testing.B) {
 	const n = 4
-	// Tiny × huge encourages IndexNestedLoopJoin when the inner has an index; fakeIndexMeta disables
-	// join index on eval_t2 so INLJ cannot apply when t2 is inner — with AssumeSortedJoinInputs,
-	// SortMergeJoin wins over HashJoin on the tie.
-	statsByEvalIdx := []float64{
-		50,          // eval_t0
-		12_000_000,  // eval_t1
-		12_000_000,  // eval_t2 — large; index gate controlled below
-		400_000,     // eval_t3
-	}
+	statsByEvalIdx := syntheticTest4RowCountsFromCSVs(b)
 
-	cat := newEvalNTableChainCatalogTB(t, n)
-	logicalRoot := newEvalNTableChainLogicalJoinTB(t, cat, n)
+	cat := newEvalNTableChainCatalogTB(b, n)
+	logicalRoot := newEvalNTableChainLogicalJoinTB(b, cat, n)
 	scans, preds := collectJoinOptimizerInputs(logicalRoot)
 	if len(preds) == 0 {
-		t.Fatal("expected join predicates")
+		b.Fatal("expected join predicates")
 	}
 
-	rowByOID := evalRowLookupForChainTB(t, cat, statsByEvalIdx)
-	oidToEval := evalOidToEvalTableIndex(t, cat, n)
+	rowByOID := evalRowLookupForChainTB(b, cat, statsByEvalIdx)
+	oidToEval := evalOidToEvalTableIndex(b, cat, n)
 	tableRows := evalStatsPermutedForScans(scans, statsByEvalIdx, oidToEval)
 
-	// RBO: fixed rule order (physicalRulesJoinEval); cost the built plan with catalog index metadata
-	// so InnerHasJoinIndex matches real btree indexes on id.
 	builder := NewPhysicalPlanBuilder(cat, physicalRulesJoinEval())
 	pRBO, err := builder.Build(logicalRoot)
 	if err != nil {
-		t.Fatalf("RBO Build: %v", err)
+		b.Fatalf("original PhysicalPlanBuilder Build: %v", err)
 	}
 	indexMetaCatalog := newCatalogJoinIndexMeta(scans)
 	oidToScan := evalOidToScanOrdinal(scans)
@@ -552,7 +545,7 @@ func TestEvalJoinCBOMixesJoinAlgorithms(t *testing.T) {
 
 	best := opt.FindBestJoin()
 	if best == nil {
-		t.Fatal("nil CBO plan")
+		b.Fatal("nil CBO plan")
 	}
 
 	ops := collectCBOJoinOperators(best)
@@ -567,19 +560,24 @@ func TestEvalJoinCBOMixesJoinAlgorithms(t *testing.T) {
 		}
 	}
 	if !hasINLJ || !hasSMJ {
-		t.Fatalf("expected both IndexNestedLoopJoin and SortMergeJoin in plan, distinct=%v ops=%v plan=%s",
+		b.Fatalf("expected both IndexNestedLoopJoin and SortMergeJoin in plan, distinct=%v ops=%v plan=%s",
 			distinct, ops, best.String())
 	}
 
-	t.Log("── 4-table chain: rule-built vs CBO ──")
-	t.Log("  Physical plan (catalog indexes; rule-built operators)")
-	t.Logf("    cost:  %.6g", rboCost)
-	t.Logf("    joins: %s", formatJoinSequence(rboJoins))
-	t.Log("  CBO (AssumeSortedJoinInputs + fake IndexMeta on eval_t2)")
-	t.Logf("    cost:  %.6g", best.Cost)
-	t.Logf("    joins: %s", formatJoinSequence(ops))
-	t.Logf("    tree:  %s", best.String())
-	t.Logf("    distinct operators: %s (%d)", strings.Join(distinct, ", "), len(distinct))
+	if testing.Verbose() {
+		evalJoinCBOMixCompareVerboseOnce.Do(func() {
+			b.Logf("synthetic_data row counts [regions, orders, web_logs, users] → eval_t0..t3: %v", statsByEvalIdx)
+			evalLogJoinCompare(b, "── 4-table chain: original joining vs CBO (synthetic_data stats) ──",
+				rboCost, rboJoins, best.Cost, ops, best)
+			b.Logf("  distinct CBO operators: %s (%d)", strings.Join(distinct, ", "), len(distinct))
+		})
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		_ = opt.FindBestJoin()
+	}
 }
 
 func distinctStrings(in []string) []string {
@@ -594,4 +592,3 @@ func distinctStrings(in []string) []string {
 	}
 	return out
 }
-

@@ -1,5 +1,6 @@
 .DS_Store
 godb_data/
+synthetic_data/load_staging/
 *.dat
 mbta/
 mbta_clean/

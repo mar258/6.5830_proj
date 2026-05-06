@@ -1,0 +1,97 @@
+{
+  "next_id": 12,
+  "tables": [
+    {
+      "oid": 1,
+      "name": "regions",
+      "columns": [
+        { "name": "region_id", "type": 1 },
+        { "name": "region_name_hash", "type": 2 }
+      ],
+      "indexes": [
+        {
+          "oid": 2,
+          "table_oid": 1,
+          "name": "idx_regions_region_id",
+          "type": "btree",
+          "key_schema": ["region_id"]
+        }
+      ]
+    },
+    {
+      "oid": 3,
+      "name": "users",
+      "columns": [
+        { "name": "user_id", "type": 1 },
+        { "name": "region_id", "type": 1 },
+        { "name": "account_balance", "type": 2 }
+      ],
+      "indexes": [
+        {
+          "oid": 4,
+          "table_oid": 3,
+          "name": "idx_users_user_id",
+          "type": "btree",
+          "key_schema": ["user_id"]
+        },
+        {
+          "oid": 5,
+          "table_oid": 3,
+          "name": "idx_users_region_id",
+          "type": "btree",
+          "key_schema": ["region_id"]
+        }
+      ]
+    },
+    {
+      "oid": 6,
+      "name": "orders",
+      "columns": [
+        { "name": "order_id", "type": 1 },
+        { "name": "user_id", "type": 1 },
+        { "name": "order_amount", "type": 2 }
+      ],
+      "indexes": [
+        {
+          "oid": 7,
+          "table_oid": 6,
+          "name": "idx_orders_order_id",
+          "type": "btree",
+          "key_schema": ["order_id"]
+        },
+        {
+          "oid": 8,
+          "table_oid": 6,
+          "name": "idx_orders_user_id",
+          "type": "btree",
+          "key_schema": ["user_id"]
+        }
+      ]
+    },
+    {
+      "oid": 9,
+      "name": "web_logs",
+      "columns": [
+        { "name": "log_id", "type": 1 },
+        { "name": "user_id", "type": 1 },
+        { "name": "action_type", "type": 1 }
+      ],
+      "indexes": [
+        {
+          "oid": 10,
+          "table_oid": 9,
+          "name": "idx_web_logs_log_id",
+          "type": "btree",
+          "key_schema": ["log_id"]
+        },
+        {
+          "oid": 11,
+          "table_oid": 9,
+          "name": "idx_web_logs_user_id",
+          "type": "btree",
+          "key_schema": ["user_id"]
+        }
+      ]
+    }
+  ]
+}

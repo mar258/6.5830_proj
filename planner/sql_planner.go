@@ -26,6 +26,25 @@ func NewSQLPlanner(c *catalog.Catalog, logicalRules []LogicalRule, physicalRules
 // Plan takes a SQL string and returns a constructed Physical Plan tree.
 // It handles the pipeline: SQL -> AST -> Logical -> Optimized -> Physical.
 func (p *SQLPlanner) Plan(sql string, silent bool) (PlanNode, error) {
+	return p.planInternal(sql, silent, false, 0, nil)
+}
+
+func (p *SQLPlanner) PlanWithCBO(
+	sql string,
+	silent bool,
+	availableBuffers int,
+	rowEstimator func(tableName string) (float64, error),
+) (PlanNode, error) {
+	return p.planInternal(sql, silent, true, availableBuffers, rowEstimator)
+}
+
+func (p *SQLPlanner) planInternal(
+	sql string,
+	silent bool,
+	useCBO bool,
+	availableBuffers int,
+	rowEstimator func(tableName string) (float64, error),
+) (PlanNode, error) {
 	stmt, err := sqlparser.Parse(sql)
 	if err != nil {
 		return nil, fmt.Errorf("parse error: %w", err)
@@ -48,6 +67,11 @@ func (p *SQLPlanner) Plan(sql string, silent bool) (PlanNode, error) {
 	}
 
 	pb := NewPhysicalPlanBuilder(p.catalog, p.physicalRules)
+	if useCBO {
+		pb.EnableCBOJoinReorder()
+		pb.SetCBOConfig(availableBuffers, rowEstimator)
+	}
+
 	physicalPlan, err := pb.Build(optimizedPlan)
 	if err != nil {
 		return nil, fmt.Errorf("physical planning error: %w", err)

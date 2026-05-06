@@ -233,9 +233,13 @@ func (b *ExpressionBinder) FuseProjectionIntoExpr(e Expr, childLogicalSchema Log
 }
 
 type PhysicalPlanBuilder struct {
-	catalog    *catalog.Catalog
-	rules      []PhysicalConversionRule
-	exprBinder *ExpressionBinder
+	catalog              *catalog.Catalog
+	rules                []PhysicalConversionRule
+	exprBinder           *ExpressionBinder
+	enableCBOJoinReorder bool
+
+	cboAvailableBuffers int
+	cboRowEstimator     func(tableName string) (float64, error)
 }
 
 func NewPhysicalPlanBuilder(catalog *catalog.Catalog, customRules []PhysicalConversionRule) *PhysicalPlanBuilder {
@@ -246,7 +250,27 @@ func NewPhysicalPlanBuilder(catalog *catalog.Catalog, customRules []PhysicalConv
 	}
 }
 
+func (b *PhysicalPlanBuilder) EnableCBOJoinReorder() {
+	b.enableCBOJoinReorder = true
+}
+
+func (b *PhysicalPlanBuilder) SetCBOConfig(
+	availableBuffers int,
+	rowEstimator func(tableName string) (float64, error),
+) {
+	b.cboAvailableBuffers = availableBuffers
+	b.cboRowEstimator = rowEstimator
+}
+
 func (b *PhysicalPlanBuilder) Build(logicalPlan LogicalPlanNode) (PlanNode, error) {
+	if b.enableCBOJoinReorder{
+		if _, ok := logicalPlan.(*LogicalJoinNode); ok {
+			if node, used, err := b.TryBuildCBOReorderedJoin(logicalPlan); used {
+				return node, err
+			}
+		}
+	}
+
 	logicalChildren := logicalPlan.Children()
 	physicalChildren := make([]PlanNode, len(logicalChildren))
 

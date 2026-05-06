@@ -149,6 +149,7 @@ func printUsage() {
 	fmt.Println("\nShell Commands:")
 	fmt.Println("  help             Show this usage information")
 	fmt.Println("  joinopt <sql>;   Explain join-optimizer choice for a query")
+	fmt.Println("  cbo <sql>;       Execute query using CBO join reordering")
 	fmt.Println("  exit, \\q         Exit the shell")
 	fmt.Println("\nNotes:")
 	fmt.Println("  - The CSV loader is a basic implementation. It does not escape characters.")
@@ -369,6 +370,7 @@ func runShell(args []string) {
 	scanner := bufio.NewScanner(os.Stdin)
 	var queryBuffer bytes.Buffer
 	joinOptMode := false
+	cboMode := false
 
 	for {
 		if queryBuffer.Len() == 0 {
@@ -418,6 +420,30 @@ func runShell(args []string) {
 				}
 				continue
 			}
+			if strings.HasPrefix(strings.ToLower(line), "cbo") {
+				rest := strings.TrimSpace(line[len("cbo"):])
+
+				if rest == "" {
+					cboMode = true
+					continue
+				}
+
+				queryBuffer.WriteString(rest)
+				queryBuffer.WriteString(" ")
+				cboMode = true
+
+				if strings.HasSuffix(rest, ";") {
+					err := executeStatementCBO(db, queryBuffer.String(), false, *explain)
+					if err != nil {
+						fmt.Printf("Error: %v\n", err)
+					}
+
+					queryBuffer.Reset()
+					cboMode = false
+				}
+
+				continue
+			}
 		}
 
 		queryBuffer.WriteString(line)
@@ -429,19 +455,32 @@ func runShell(args []string) {
 				explain, err := db.Planner.ExplainJoinOptimizer(fullQuery, bufferSize, func(tableName string) (float64, error) {
 					return estimateTableRows(db, tableName)
 				})
+
 				if err != nil {
 					fmt.Printf("Error: %v\n", err)
 				} else {
 					fmt.Print(explain)
 				}
+
+			} else if cboMode {
+
+				err := executeStatementCBO(db, fullQuery, false, *explain)
+
+				if err != nil {
+					fmt.Printf("Error: %v\n", err)
+				}
+
 			} else {
+
 				err := executeStatement(db, fullQuery, false, *explain)
+
 				if err != nil {
 					fmt.Printf("Error: %v\n", err)
 				}
 			}
 			queryBuffer.Reset()
 			joinOptMode = false
+			cboMode = false
 		}
 	}
 }
@@ -507,6 +546,81 @@ func executeStatement(db *GoDB, sql string, silent bool, explain bool) error {
 			fmt.Printf("(%d rows) [%v]\n", count, duration)
 		}
 	}
+	return nil
+}
+
+func executeStatementCBO(db *GoDB, sql string, silent bool, explain bool) error {
+	plan, err := db.Planner.PlanWithCBO(
+		sql,
+		(!explain) || silent,
+		bufferSize,
+		func(tableName string) (float64, error) {
+			return estimateTableRows(db, tableName)
+		},
+	)
+	if err != nil {
+		return err
+	}
+
+	if explain {
+		fmt.Println("Physical Plan:")
+		fmt.Println(planner.PrettyPrint(plan))
+		fmt.Println("")
+	}
+
+	executor, err := execution.BuildExecutorTree(plan, db.Catalog, db.TableManager, db.IndexManager)
+	if err != nil {
+		return err
+	}
+
+	err = executor.Init(execution.NewExecutorContext(nil))
+	if err != nil {
+		return err
+	}
+	defer executor.Close()
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	count := 0
+	start := time.Now()
+
+	if !silent {
+		if proj, ok := plan.(*planner.ProjectionNode); ok {
+			headers := projectionHeaders(proj)
+			if len(headers) > 0 {
+				fmt.Fprintln(w, strings.Join(headers, "\t"))
+			}
+		}
+	}
+
+	for executor.Next() {
+		tuple := executor.Current()
+		count++
+
+		if !silent {
+			var fields []string
+			for i := 0; i < tuple.NumColumns(); i++ {
+				val := tuple.GetValue(i)
+				fields = append(fields, val.String())
+			}
+			fmt.Fprintln(w, strings.Join(fields, "\t"))
+		}
+	}
+
+	_ = w.Flush()
+
+	if err := executor.Error(); err != nil {
+		return err
+	}
+
+	if !silent {
+		printJoinCosts(db, sql, plan)
+		duration := time.Since(start)
+
+		if count > 0 || duration > time.Millisecond*10 {
+			fmt.Printf("(CBO: %d rows) [%v]\n", count, duration)
+		}
+	}
+
 	return nil
 }
 

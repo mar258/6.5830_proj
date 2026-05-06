@@ -166,9 +166,6 @@ func (opt *JoinOptimizer) FindBestJoin() *Plan {
 					continue
 				}
 				joinPredicates := opt.predicatesForJoin(leftMask, i)
-				if len(joinPredicates) == 0 {
-					continue
-				}
 
 				candidates := opt.joinCandidates(leftPlan, rightPlan, joinPredicates)
 				jc, outRows, ok, physicalJoin := bestCandidate(candidates)

@@ -5,6 +5,7 @@ import (
 
 	"github.com/xwb1989/sqlparser"
 	"mit.edu/dsg/godb/catalog"
+	"mit.edu/dsg/godb/common"
 )
 
 // ExplainJoinOptimizer builds JoinOptimizer input from a SQL query and returns
@@ -19,6 +20,66 @@ func (p *SQLPlanner) ExplainJoinOptimizer(sql string, availableBuffers int, rowE
 	}
 
 	return ExplainBestJoin(opt), nil
+}
+
+// EstimateExecutedPhysicalPlanJoinCost estimates the join cost of the physical
+// plan that was actually produced by the rule-based physical planner.
+func (p *SQLPlanner) EstimateExecutedPhysicalPlanJoinCost(
+	sql string,
+	physicalPlan PlanNode,
+	availableBuffers int,
+	rowEstimator func(tableName string) (float64, error),
+) (float64, bool, error) {
+	stmt, err := sqlparser.Parse(sql)
+	if err != nil {
+		return 0, false, fmt.Errorf("parse error: %w", err)
+	}
+
+	lb := NewLogicalPlanBuilder(p.catalog)
+	logicalPlan, err := lb.Plan(stmt)
+	if err != nil {
+		return 0, false, fmt.Errorf("logical planning error: %w", err)
+	}
+
+	scans, predicates := collectJoinOptimizerInputs(logicalPlan)
+	if len(scans) < 2 {
+		return 0, false, nil
+	}
+
+	rowCountsByOID := make(map[common.ObjectID]float64)
+	oidToBaseTableIdx := make(map[common.ObjectID]int)
+
+	for i, scan := range scans {
+		if scan == nil || scan.TableRef == nil || scan.TableRef.table == nil {
+			continue
+		}
+
+		oid := scan.GetTableOid()
+		oidToBaseTableIdx[oid] = i
+
+		rows := 1.0
+		if rowEstimator != nil {
+			estimatedRows, err := rowEstimator(scan.TableRef.table.Name)
+			if err != nil {
+				return 0, true, fmt.Errorf("row estimation failed for table '%s': %w", scan.TableRef.table.Name, err)
+			}
+			if estimatedRows > 0 {
+				rows = estimatedRows
+			}
+		}
+		rowCountsByOID[oid] = rows
+	}
+
+	cost, _ := EstimatePhysicalPlanJoinOptimizerCost(
+		physicalPlan,
+		rowCountsByOID,
+		predicates,
+		availableBuffers,
+		newCatalogJoinIndexMeta(scans),
+		oidToBaseTableIdx,
+	)
+
+	return cost, true, nil
 }
 
 // EstimateJoinOptimizerCost returns the estimated CBO join cost for SQL queries
@@ -71,10 +132,18 @@ func (p *SQLPlanner) buildJoinOptimizer(sql string, availableBuffers int, rowEst
 		}
 	}
 
+	tableRefIDs := make([]uint64, len(scans))
+	for i, scan := range scans {
+		if scan != nil && scan.TableRef != nil {
+			tableRefIDs[i] = scan.TableRef.refID
+		}
+	}
+
 	return &JoinOptimizer{
 		numTables:        len(scans),
 		TableRows:        tableRows,
 		Predicates:       predicates,
+		TableRefIDs:      tableRefIDs,
 		AvailableBuffers: availableBuffers,
 		IndexMeta:        newCatalogJoinIndexMeta(scans),
 	}, true, nil
@@ -104,14 +173,10 @@ func collectJoinOptimizerInputs(root LogicalPlanNode) ([]*LogicalScanNode, []Exp
 			return
 		case *LogicalJoinNode:
 			for _, pred := range n.joinOn {
-				if isJoinPredicate(pred) {
-					predicates = append(predicates, pred)
-				}
+				predicates = append(predicates, collectJoinPredicateAtoms(pred)...)
 			}
 		case *LogicalFilterNode:
-			if isJoinPredicate(n.Predicate) {
-				predicates = append(predicates, n.Predicate)
-			}
+			predicates = append(predicates, collectJoinPredicateAtoms(n.Predicate)...)
 		}
 
 		for _, child := range node.Children() {
@@ -121,6 +186,23 @@ func collectJoinOptimizerInputs(root LogicalPlanNode) ([]*LogicalScanNode, []Exp
 
 	walk(root)
 	return scans, predicates
+}
+
+func collectJoinPredicateAtoms(expr Expr) []Expr {
+	if expr == nil {
+		return nil
+	}
+
+	if logic, ok := expr.(*BinaryLogicExpression); ok && logic.logicType == And {
+		left := collectJoinPredicateAtoms(logic.left)
+		right := collectJoinPredicateAtoms(logic.right)
+		return append(left, right...)
+	}
+
+	if isJoinPredicate(expr) {
+		return []Expr{expr}
+	}
+	return nil
 }
 
 func isJoinPredicate(expr Expr) bool {

@@ -76,7 +76,7 @@ func NewGoDB(catalog *catalog.Catalog, storageDir, logDir string, bufferPoolSize
 		&planner.SeqScanRule{},
 		&planner.IndexScanRule{},
 		&planner.IndexLookupRule{},
-		// &planner.IndexNestedLoopJoinRule{},
+		&planner.IndexNestedLoopJoinRule{},
 		&planner.SortMergeJoinRule{},
 		&planner.HashJoinRule{},
 		&planner.BlockNestedLoopJoinRule{},
@@ -501,7 +501,7 @@ func executeStatement(db *GoDB, sql string, silent bool, explain bool) error {
 	}
 
 	if !silent {
-		printJoinCost(db, sql)
+		printJoinCosts(db, sql, plan)
 		duration := time.Since(start)
 		if count > 0 || duration > time.Millisecond*10 {
 			fmt.Printf("(%d rows) [%v]\n", count, duration)
@@ -510,16 +510,25 @@ func executeStatement(db *GoDB, sql string, silent bool, explain bool) error {
 	return nil
 }
 
-func printJoinCost(db *GoDB, sql string) {
-	cost, ok, err := db.Planner.EstimateJoinOptimizerCost(sql, bufferSize, func(tableName string) (float64, error) {
+func printJoinCosts(db *GoDB, sql string, physicalPlan planner.PlanNode) {
+	baselineCost, baselineOK, baselineErr := db.Planner.EstimateExecutedPhysicalPlanJoinCost(sql, physicalPlan, bufferSize, func(tableName string) (float64, error) {
 		return estimateTableRows(db, tableName)
 	})
-	if err != nil {
-		fmt.Printf("Estimated join cost: unavailable (%v)\n", err)
+	if baselineErr != nil {
+		fmt.Printf("Executed physical-plan estimated join cost: unavailable (%v)\n", baselineErr)
+	} else if baselineOK {
+		fmt.Printf("Executed physical-plan estimated join cost: %.2f\n", baselineCost)
+	}
+
+	cboCost, cboOK, cboErr := db.Planner.EstimateJoinOptimizerCost(sql, bufferSize, func(tableName string) (float64, error) {
+		return estimateTableRows(db, tableName)
+	})
+	if cboErr != nil {
+		fmt.Printf("CBO best estimated join cost: unavailable (%v)\n", cboErr)
 		return
 	}
-	if ok {
-		fmt.Printf("Estimated join cost: %.2f\n", cost)
+	if cboOK {
+		fmt.Printf("CBO best estimated join cost: %.2f\n", cboCost)
 	}
 }
 

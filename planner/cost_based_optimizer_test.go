@@ -146,7 +146,7 @@ func TestCBOBestJoinCostChoosesHashOverBNLJ(t *testing.T) {
 	left := &Plan{OutputRows: 1_000_000}
 	right := &Plan{OutputRows: 1_000_000}
 
-	_, _, ok, physical := opt.bestJoinCost(left, right)
+	_, _, ok, physical := opt.bestJoinCost(left, right, opt.Predicates)
 
 	if !ok {
 		t.Fatal("expected a valid physical join")
@@ -156,7 +156,6 @@ func TestCBOBestJoinCostChoosesHashOverBNLJ(t *testing.T) {
 		t.Fatalf("expected HashJoin, got %s", physical)
 	}
 }
-
 func TestCBOBestJoinCostChoosesSortMergeWhenAlreadyOrdered(t *testing.T) {
 	input := JoinCostInput{
 		LeftRows:         1_000,

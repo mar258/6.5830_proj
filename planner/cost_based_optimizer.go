@@ -29,12 +29,13 @@ type JoinOptimizer struct {
 	numTables  int
 	estimators []JoinCostEstimator
 	// TableRows[i] is the estimated row count for base table i; if shorter than numTables, missing entries default to 1.
-	TableRows  []float64
-	Predicates []Expr
+	TableRows   []float64
+	Predicates  []Expr
+	TableRefIDs []uint64 // TableRefIDs[i] is the LogicalScan/TableRef refID for base table i.
 	// AvailableBuffers is passed through to estimators (e.g. BNLJ).
 	AvailableBuffers int
 	// IndexMeta wires catalog/index info into join costing; optional.
-	IndexMeta JoinIndexMetadata
+	IndexMeta              JoinIndexMetadata
 	AssumeSortedJoinInputs bool
 }
 
@@ -58,11 +59,11 @@ func (opt *JoinOptimizer) estimatorsForSearch() []JoinCostEstimator {
 }
 
 // bestJoinCost picks the cheapest physical join
-func (opt *JoinOptimizer) bestJoinCost(leftPlan, rightPlan *Plan) (joinCost float64, outputRows float64, ok bool, physicalJoin string) {
+func (opt *JoinOptimizer) bestJoinCost(leftPlan, rightPlan *Plan, predicates []Expr) (joinCost float64, outputRows float64, ok bool, physicalJoin string) {
 	joinCost = math.Inf(1)
 	outputRows = math.Inf(1)
 
-	for _, c := range opt.joinCandidates(leftPlan, rightPlan) {
+	for _, c := range opt.joinCandidates(leftPlan, rightPlan, predicates) {
 		if !c.Applicable || math.IsInf(c.Cost, 1) {
 			continue
 		}
@@ -77,7 +78,7 @@ func (opt *JoinOptimizer) bestJoinCost(leftPlan, rightPlan *Plan) (joinCost floa
 	return joinCost, outputRows, ok, physicalJoin
 }
 
-func (opt *JoinOptimizer) joinCandidates(leftPlan, rightPlan *Plan) []JoinCandidate {
+func (opt *JoinOptimizer) joinCandidates(leftPlan, rightPlan *Plan, predicates []Expr) []JoinCandidate {
 	buffers := opt.AvailableBuffers
 	if buffers <= 0 {
 		buffers = 1
@@ -88,9 +89,9 @@ func (opt *JoinOptimizer) joinCandidates(leftPlan, rightPlan *Plan) []JoinCandid
 		RightRows:              rightPlan.OutputRows,
 		LeftRowWidth:           1,
 		RightRowWidth:          1,
-		Predicates:             opt.Predicates,
+		Predicates:             predicates,
 		AvailableBuffers:       buffers,
-		RightHasIndexOnJoinKey: opt.rightLeafHasJoinIndex(rightPlan),
+		RightHasIndexOnJoinKey: opt.rightLeafHasJoinIndex(rightPlan, predicates),
 		LeftHasOrdering:        opt.AssumeSortedJoinInputs,
 		RightHasOrdering:       opt.AssumeSortedJoinInputs,
 	}
@@ -119,11 +120,11 @@ func (opt *JoinOptimizer) joinCandidates(leftPlan, rightPlan *Plan) []JoinCandid
 
 // rightLeafHasJoinIndex reports whether the single-table child of this join step has a
 // join index on the inner side
-func (opt *JoinOptimizer) rightLeafHasJoinIndex(rightPlan *Plan) bool {
+func (opt *JoinOptimizer) rightLeafHasJoinIndex(rightPlan *Plan, predicates []Expr) bool {
 	if opt.IndexMeta == nil || rightPlan == nil || rightPlan.LeftChild != nil {
 		return false
 	}
-	return opt.IndexMeta.InnerHasJoinIndex(rightPlan.RightTable, opt.Predicates)
+	return opt.IndexMeta.InnerHasJoinIndex(rightPlan.RightTable, predicates)
 }
 
 func (opt *JoinOptimizer) FindBestJoin() *Plan {
@@ -164,7 +165,12 @@ func (opt *JoinOptimizer) FindBestJoin() *Plan {
 				if leftPlan == nil || rightPlan == nil {
 					continue
 				}
-				candidates := opt.joinCandidates(leftPlan, rightPlan)
+				joinPredicates := opt.predicatesForJoin(leftMask, i)
+				if len(joinPredicates) == 0 {
+					continue
+				}
+
+				candidates := opt.joinCandidates(leftPlan, rightPlan, joinPredicates)
 				jc, outRows, ok, physicalJoin := bestCandidate(candidates)
 				if !ok {
 					continue
@@ -396,6 +402,59 @@ func (ce *BlockNestedLoopJoinCostEstimator) Estimate(input JoinCostInput) JoinCo
 }
 
 // Start helper functions
+func (opt *JoinOptimizer) predicatesForJoin(leftMask uint32, rightTable int) []Expr {
+	// Legacy fallback for synthetic tests that construct JoinOptimizer directly
+	// without table ref IDs.
+	if len(opt.TableRefIDs) < opt.numTables {
+		return opt.Predicates
+	}
+
+	var result []Expr
+	for _, pred := range opt.Predicates {
+		if opt.predicateConnectsLeftToRight(pred, leftMask, rightTable) {
+			result = append(result, pred)
+		}
+	}
+	return result
+}
+
+func (opt *JoinOptimizer) predicateConnectsLeftToRight(pred Expr, leftMask uint32, rightTable int) bool {
+	refs := pred.GetReferencedColumns()
+
+	mentionsRight := false
+	mentionsLeft := false
+
+	for _, col := range refs {
+		if col == nil || col.origin == nil {
+			continue
+		}
+
+		tableIdx := opt.tableIndexForRefID(col.origin.refID)
+		if tableIdx < 0 {
+			continue
+		}
+
+		if tableIdx == rightTable {
+			mentionsRight = true
+		}
+
+		if leftMask&(uint32(1)<<tableIdx) != 0 {
+			mentionsLeft = true
+		}
+	}
+
+	return mentionsRight && mentionsLeft
+}
+
+func (opt *JoinOptimizer) tableIndexForRefID(refID uint64) int {
+	for i, id := range opt.TableRefIDs {
+		if id == refID {
+			return i
+		}
+	}
+	return -1
+}
+
 func impossibleCost() JoinCostEstimate {
 	return JoinCostEstimate{
 		Cost:       math.Inf(1),
@@ -484,7 +543,6 @@ func debugJoinCost(name string, input JoinCostInput, est JoinCostEstimate) strin
 		est.OutputRows,
 	)
 }
-
 
 // USED FOR CALCULATING COST OF RBO in cost_based_optimizer_eval
 // unwrapPhysicalPlanDecorators strips planner decoration nodes so costing sees scans and joins.

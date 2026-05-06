@@ -1,0 +1,5 @@
+.DS_Store
+godb_data/
+*.dat
+mbta/
+mbta_clean/

@@ -97,6 +97,57 @@ func (p *SQLPlanner) EstimateJoinOptimizerCost(sql string, availableBuffers int,
 	return best.Cost, true, nil
 }
 
+// PrepareCostBasedJoin builds join cardinality inputs from logicalPlan, runs FindBestJoin,
+// and returns (opt, bestPlan, scans, ok, err). When ok is false (fewer than two base scans,
+// no valid join plan, or row estimation error), the caller should use rule-based physical joins only.
+func PrepareCostBasedJoin(logicalPlan LogicalPlanNode, availableBuffers int, rowEstimator func(tableName string) (float64, error)) (*JoinOptimizer, *Plan, []*LogicalScanNode, bool, error) {
+	scans, predicates := collectJoinOptimizerInputs(logicalPlan)
+	if len(scans) < 2 {
+		return nil, nil, nil, false, nil
+	}
+	if availableBuffers <= 0 {
+		availableBuffers = 100
+	}
+
+	tableRows := make([]float64, len(scans))
+	for i := range tableRows {
+		tableRows[i] = 1
+	}
+	for i, scan := range scans {
+		if rowEstimator == nil || scan == nil || scan.TableRef == nil || scan.TableRef.table == nil {
+			continue
+		}
+		rows, err := rowEstimator(scan.TableRef.table.Name)
+		if err != nil {
+			return nil, nil, scans, false, err
+		}
+		if rows > 0 {
+			tableRows[i] = rows
+		}
+	}
+
+	tableRefIDs := make([]uint64, len(scans))
+	for i, scan := range scans {
+		if scan != nil && scan.TableRef != nil {
+			tableRefIDs[i] = scan.TableRef.refID
+		}
+	}
+
+	opt := &JoinOptimizer{
+		numTables:        len(scans),
+		TableRows:        tableRows,
+		Predicates:       predicates,
+		TableRefIDs:      tableRefIDs,
+		AvailableBuffers: availableBuffers,
+		IndexMeta:        newCatalogJoinIndexMeta(scans),
+	}
+	best := opt.FindBestJoin()
+	if best == nil {
+		return opt, nil, scans, false, nil
+	}
+	return opt, best, scans, true, nil
+}
+
 func (p *SQLPlanner) buildJoinOptimizer(sql string, availableBuffers int, rowEstimator func(tableName string) (float64, error)) (*JoinOptimizer, bool, error) {
 	stmt, err := sqlparser.Parse(sql)
 	if err != nil {

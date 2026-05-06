@@ -166,9 +166,8 @@ func (opt *JoinOptimizer) FindBestJoin() *Plan {
 					continue
 				}
 				joinPredicates := opt.predicatesForJoin(leftMask, i)
-				if len(joinPredicates) == 0 {
-					continue
-				}
+				// Empty predicates are allowed (cross-product edges); BlockNestedLoopJoin and
+				// similar operators still participate via joinCandidates.
 
 				candidates := opt.joinCandidates(leftPlan, rightPlan, joinPredicates)
 				jc, outRows, ok, physicalJoin := bestCandidate(candidates)

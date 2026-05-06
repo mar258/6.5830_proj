@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"text/tabwriter"
+	"testing"
 	"time"
 
 	"mit.edu/dsg/godb/catalog"
@@ -146,9 +147,11 @@ func printUsage() {
 	fmt.Println("  -db <dir>        Directory for database heap files (default: godb_data)")
 	fmt.Println("  -log <dir>       Directory for write-ahead logs (default: godb_log)")
 	fmt.Println("  -buffer <int>    Buffer pool size in pages (default: 1000)")
+	fmt.Println("  -bench           Print benchmark-style stats per query (shell only)")
 	fmt.Println("\nShell Commands:")
 	fmt.Println("  help             Show this usage information")
 	fmt.Println("  joinopt <sql>;   Explain join-optimizer choice for a query")
+	fmt.Println("  (Use  godb shell -bench  for iterations / ns/op / B/op / allocs per query)")
 	fmt.Println("  exit, \\q         Exit the shell")
 	fmt.Println("\nNotes:")
 	fmt.Println("  - The CSV loader is a basic implementation. It does not escape characters.")
@@ -328,7 +331,7 @@ func loadTableFromCSV(db *GoDB, tableName string, fileName string) (int, error) 
 		}
 
 		// pass false for explain (loading doesn't need plan printing)
-		if err := executeStatement(db, sb.String(), true, false); err != nil {
+		if err := executeStatement(db, sb.String(), true, false, false); err != nil {
 			return rowCount, fmt.Errorf("batch insert error at row %d: %w", i, err)
 		}
 		rowCount += (end - i)
@@ -346,6 +349,7 @@ func runShell(args []string) {
 	setupCommonFlags(fs)
 	// Add explain flag
 	explain := fs.Bool("explain", false, "Print the physical execution plan before executing")
+	bench := fs.Bool("bench", false, "Print benchmark stats per query (iterations, ns/op, B/op, allocs/op)")
 	fs.Parse(args)
 
 	fmt.Println("Initializing Engine...")
@@ -435,7 +439,7 @@ func runShell(args []string) {
 					fmt.Print(explain)
 				}
 			} else {
-				err := executeStatement(db, fullQuery, false, *explain)
+				err := executeStatement(db, fullQuery, false, *explain, *bench)
 				if err != nil {
 					fmt.Printf("Error: %v\n", err)
 				}
@@ -446,7 +450,70 @@ func runShell(args []string) {
 	}
 }
 
-func executeStatement(db *GoDB, sql string, silent bool, explain bool) error {
+// runQueryOnce plans, builds executors, drains all rows (no printing). Used for benchmarking.
+func runQueryOnce(db *GoDB, sql string, silentPlan bool) error {
+	plan, err := db.Planner.Plan(sql, silentPlan)
+	if err != nil {
+		return err
+	}
+	executor, err := execution.BuildExecutorTree(plan, db.Catalog, db.TableManager, db.IndexManager)
+	if err != nil {
+		return err
+	}
+	if err := executor.Init(execution.NewExecutorContext(nil)); err != nil {
+		return err
+	}
+	defer executor.Close()
+	for executor.Next() {
+	}
+	return executor.Error()
+}
+
+func benchmarkQuery(db *GoDB, sql string, explain bool) error {
+	if explain {
+		plan, err := db.Planner.Plan(sql, false)
+		if err != nil {
+			return err
+		}
+		fmt.Println("Physical Plan:")
+		fmt.Println(planner.PrettyPrint(plan))
+		fmt.Println("")
+	}
+
+	// Validate once — do not use testing.B.Fatal inside Benchmark when run from main:
+	// b.Fatal expects full test harness setup and can panic with nil deref outside go test.
+	if err := runQueryOnce(db, sql, true); err != nil {
+		return err
+	}
+
+	var benchErr error
+	result := testing.Benchmark(func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			if err := runQueryOnce(db, sql, true); err != nil {
+				benchErr = err
+				return
+			}
+		}
+	})
+	if benchErr != nil {
+		return fmt.Errorf("benchmark iteration failed: %w", benchErr)
+	}
+
+	fmt.Println("--- benchmark (plan + build executor + execute + drain) ---")
+	fmt.Println(result.String())
+	fmt.Printf("iterations: %d\n", result.N)
+	fmt.Printf("ns/op:      %.2f\n", float64(result.NsPerOp()))
+	fmt.Printf("B/op:       %d\n", result.AllocedBytesPerOp())
+	fmt.Printf("allocs/op:  %.2f\n", float64(result.AllocsPerOp()))
+	return nil
+}
+
+func executeStatement(db *GoDB, sql string, silent bool, explain bool, bench bool) error {
+	if bench {
+		return benchmarkQuery(db, sql, explain)
+	}
+
 	plan, err := db.Planner.Plan(sql, (!explain) || silent)
 	if err != nil {
 		return err

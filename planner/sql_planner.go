@@ -13,6 +13,10 @@ type SQLPlanner struct {
 	catalog       *catalog.Catalog
 	opt           *Optimizer
 	physicalRules []PhysicalConversionRule
+	// RowEstimator supplies per-table row counts for cost-based join ordering; nil uses 1 row per table.
+	RowEstimator func(tableName string) (float64, error)
+	// JoinBuffers is passed to JoinOptimizer (e.g. BNLJ); 0 defaults to 100.
+	JoinBuffers int
 }
 
 func NewSQLPlanner(c *catalog.Catalog, logicalRules []LogicalRule, physicalRules []PhysicalConversionRule) *SQLPlanner {
@@ -47,7 +51,17 @@ func (p *SQLPlanner) Plan(sql string, silent bool) (PlanNode, error) {
 		fmt.Printf("Optimized Logical Plan:\n%s\n", PrettyPrintLogicalPlan(optimizedPlan))
 	}
 
+	buffers := p.JoinBuffers
+	if buffers <= 0 {
+		buffers = 100
+	}
 	pb := NewPhysicalPlanBuilder(p.catalog, p.physicalRules)
+	if opt, best, scans, ok, prepErr := PrepareCostBasedJoin(optimizedPlan, buffers, p.RowEstimator); prepErr != nil {
+		return nil, fmt.Errorf("cost-based join preparation: %w", prepErr)
+	} else if ok {
+		pb = pb.WithCostBasedJoin(opt, best, scans)
+	}
+
 	physicalPlan, err := pb.Build(optimizedPlan)
 	if err != nil {
 		return nil, fmt.Errorf("physical planning error: %w", err)

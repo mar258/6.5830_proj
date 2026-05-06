@@ -236,6 +236,13 @@ type PhysicalPlanBuilder struct {
 	catalog    *catalog.Catalog
 	rules      []PhysicalConversionRule
 	exprBinder *ExpressionBinder
+
+	// Optional cost-based join path (join cluster built from FindBestJoin instead of rule priority).
+	cboOpt       *JoinOptimizer
+	cboBest      *Plan
+	cboScans     []*LogicalScanNode
+	cboOperands  []LogicalPlanNode // per table index: subtree including filters (lazily filled)
+	operandsInit bool
 }
 
 func NewPhysicalPlanBuilder(catalog *catalog.Catalog, customRules []PhysicalConversionRule) *PhysicalPlanBuilder {
@@ -246,7 +253,24 @@ func NewPhysicalPlanBuilder(catalog *catalog.Catalog, customRules []PhysicalConv
 	}
 }
 
+// WithCostBasedJoin attaches CBO output so Build uses FindBestJoin's join order and operators
+// for the multi-table join cluster. Falls back to rules if the cluster cannot be matched.
+func (b *PhysicalPlanBuilder) WithCostBasedJoin(opt *JoinOptimizer, best *Plan, scans []*LogicalScanNode) *PhysicalPlanBuilder {
+	nb := *b
+	nb.cboOpt = opt
+	nb.cboBest = best
+	nb.cboScans = scans
+	nb.cboOperands = nil
+	nb.operandsInit = false
+	return &nb
+}
+
 func (b *PhysicalPlanBuilder) Build(logicalPlan LogicalPlanNode) (PlanNode, error) {
+	if j, ok := logicalPlan.(*LogicalJoinNode); ok && b.isCBOJoinRoot(j) {
+		b.ensureCBOOperands(j)
+		return b.materializeCBOPlan()
+	}
+
 	logicalChildren := logicalPlan.Children()
 	physicalChildren := make([]PlanNode, len(logicalChildren))
 
@@ -272,4 +296,153 @@ func (b *PhysicalPlanBuilder) Build(logicalPlan LogicalPlanNode) (PlanNode, erro
 	}
 
 	return bestRule.Apply(logicalPlan, physicalChildren, b.catalog, b.exprBinder)
+}
+
+func countJoinScans(n LogicalPlanNode) int {
+	if n == nil {
+		return 0
+	}
+	switch x := n.(type) {
+	case *LogicalScanNode:
+		return 1
+	case *LogicalJoinNode:
+		return countJoinScans(x.Left) + countJoinScans(x.Right)
+	case *LogicalFilterNode:
+		return countJoinScans(x.Child)
+	case *LogicalProjectionNode:
+		return countJoinScans(x.Child)
+	case *LogicalAggregationNode:
+		return countJoinScans(x.Child)
+	case *LogicalSortNode:
+		return countJoinScans(x.Child)
+	case *LogicalLimitNode:
+		return countJoinScans(x.Child)
+	case *LogicalSubqueryNode:
+		return countJoinScans(x.Child)
+	default:
+		sum := 0
+		for _, c := range n.Children() {
+			sum += countJoinScans(c)
+		}
+		return sum
+	}
+}
+
+func containsScanPointer(n LogicalPlanNode, scan *LogicalScanNode) bool {
+	if n == nil || scan == nil {
+		return false
+	}
+	if ls, ok := n.(*LogicalScanNode); ok && ls == scan {
+		return true
+	}
+	for _, c := range n.Children() {
+		if containsScanPointer(c, scan) {
+			return true
+		}
+	}
+	return false
+}
+
+// singleTableOperandRoot returns the smallest subtree rooted under root that contains exactly
+// one base-table scan (e.g. Filter(Scan)) so physical planning preserves pushed predicates.
+func singleTableOperandRoot(root LogicalPlanNode, scan *LogicalScanNode) LogicalPlanNode {
+	if root == nil {
+		return nil
+	}
+	if countJoinScans(root) == 1 && containsScanPointer(root, scan) {
+		return root
+	}
+	for _, c := range root.Children() {
+		if r := singleTableOperandRoot(c, scan); r != nil {
+			return r
+		}
+	}
+	return nil
+}
+
+func (b *PhysicalPlanBuilder) ensureCBOOperands(joinRoot *LogicalJoinNode) {
+	if b.operandsInit || len(b.cboScans) == 0 {
+		return
+	}
+	b.cboOperands = make([]LogicalPlanNode, len(b.cboScans))
+	for i, s := range b.cboScans {
+		op := singleTableOperandRoot(joinRoot, s)
+		if op == nil {
+			op = s
+		}
+		b.cboOperands[i] = op
+	}
+	b.operandsInit = true
+}
+
+func (b *PhysicalPlanBuilder) isCBOJoinRoot(j *LogicalJoinNode) bool {
+	if b.cboBest == nil || b.cboOpt == nil || len(b.cboScans) < 2 {
+		return false
+	}
+	switch j.joinType {
+	case Inner, Cross:
+	default:
+		return false
+	}
+	if countJoinScans(j) != len(b.cboScans) {
+		return false
+	}
+	if countJoinScans(j.Left) != len(b.cboScans)-1 || countJoinScans(j.Right) != 1 {
+		return false
+	}
+	return true
+}
+
+func (b *PhysicalPlanBuilder) logicalSubplanForPlan(p *Plan) LogicalPlanNode {
+	if p.LeftChild == nil {
+		return b.cboScans[p.RightTable]
+	}
+	left := b.logicalSubplanForPlan(p.LeftChild)
+	right := b.cboScans[p.RightTable]
+	preds := b.cboOpt.predicatesForJoin(p.LeftChild.Tables, p.RightTable)
+	return NewLogicalJoinNode(left, right, preds, Inner)
+}
+
+func (b *PhysicalPlanBuilder) materializeCBOPlan() (PlanNode, error) {
+	return b.physFromCBOPlan(b.cboBest)
+}
+
+func (b *PhysicalPlanBuilder) physFromCBOPlan(p *Plan) (PlanNode, error) {
+	if p.LeftChild == nil {
+		idx := p.RightTable
+		if idx < 0 || idx >= len(b.cboOperands) {
+			return nil, fmt.Errorf("CBO plan references unknown table index %d", idx)
+		}
+		return b.Build(b.cboOperands[idx])
+	}
+
+	leftPhys, err := b.physFromCBOPlan(p.LeftChild)
+	if err != nil {
+		return nil, err
+	}
+	rt := p.RightTable
+	if rt < 0 || rt >= len(b.cboOperands) {
+		return nil, fmt.Errorf("CBO plan references unknown table index %d", rt)
+	}
+	rightPhys, err := b.Build(b.cboOperands[rt])
+	if err != nil {
+		return nil, err
+	}
+
+	joinLog := NewLogicalJoinNode(
+		b.logicalSubplanForPlan(p.LeftChild),
+		b.cboScans[rt],
+		b.cboOpt.predicatesForJoin(p.LeftChild.Tables, rt),
+		Inner,
+	)
+	return b.applyPhysicalJoinByName(joinLog, []PlanNode{leftPhys, rightPhys}, p.PhysicalJoin)
+}
+
+func (b *PhysicalPlanBuilder) applyPhysicalJoinByName(join *LogicalJoinNode, children []PlanNode, physicalJoin string) (PlanNode, error) {
+	for _, rule := range b.rules {
+		if rule.Name() == physicalJoin {
+			return rule.Apply(join, children, b.catalog, b.exprBinder)
+		}
+	}
+	return nil, fmt.Errorf("no physical rule named %q for cost-based join choice", physicalJoin)
 }

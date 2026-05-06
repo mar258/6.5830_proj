@@ -99,19 +99,19 @@ func evalLogJoinCompare(tb testing.TB, title string, physicalCost float64, physi
 	}
 }
 
-func evalLogPhysicalJoinPlan(t *testing.T, title string, cost float64, ops []string) {
-	t.Helper()
-	t.Log(title)
-	t.Logf("  cost:  %.6g", cost)
-	t.Logf("  joins: %s", formatJoinSequence(ops))
+func evalLogPhysicalJoinPlan(tb testing.TB, title string, cost float64, ops []string) {
+	tb.Helper()
+	tb.Log(title)
+	tb.Logf("  cost:  %.6g", cost)
+	tb.Logf("  joins: %s", formatJoinSequence(ops))
 }
 
-func evalLogCBOPlan(t *testing.T, title string, best *Plan) {
-	t.Helper()
-	t.Log(title)
-	t.Logf("  cost:  %.6g", best.Cost)
-	t.Logf("  joins: %s", formatJoinSequence(collectCBOJoinOperators(best)))
-	t.Logf("  tree:  %s", best.String())
+func evalLogCBOPlan(tb testing.TB, title string, best *Plan) {
+	tb.Helper()
+	tb.Log(title)
+	tb.Logf("  cost:  %.6g", best.Cost)
+	tb.Logf("  joins: %s", formatJoinSequence(collectCBOJoinOperators(best)))
+	tb.Logf("  tree:  %s", best.String())
 }
 
 func newEvalNTableChainCatalogTB(tb testing.TB, n int) *catalog.Catalog {
@@ -532,17 +532,26 @@ func BenchmarkEvalJoinChain150kTablesIOCost(b *testing.B) {
 	}
 }
 
-// evalJoinSkewedSizes is one row-count estimate per base table (eval_t0 … eval_t4) for a 5-way chain.
-var evalJoinSkewedSizes = []float64{6_000_000, 1_500_000, 150_000, 100_000, 25}
+// evalJoinSkewedSizes is one row-count estimate per base table (eval_t1 … eval_t4) for a 5-way chain
+// (matches synthetic_data/test3/test3.py TABLE_SIZES).
+var evalJoinSkewedSizes = []float64{1_500_000, 150_000, 100_000, 25}
 
-// TestEvalJoinChainSkewedSizesIOCost logs costs and join operators for skewed 5-table chains.
-func TestEvalJoinChainSkewedSizesIOCost(t *testing.T) {
-	const n = 5
+var skewedChainBenchVerboseOnce sync.Map
+
+// BenchmarkEvalJoinChainSkewedSizesIOCost measures a skewed 5-table chain (same stats as test3).
+// Sub-benchmarks (original TestEvalJoinChainSkewedSizesIOCost scenarios):
+//   - Physical_small_to_large — rule-built plan + cost, leaf scans ordered small→large by cardinality
+//   - Physical_large_to_small — rule-built plan + cost, leaf scans ordered large→small
+//   - CBO — FindBestJoin (TableRows from ascending-size scan order)
+//
+// With -bench -v, logs each scenario once before timing (evalLogPhysicalJoinPlan / evalLogCBOPlan).
+func BenchmarkEvalJoinChainSkewedSizesIOCost(b *testing.B) {
+	const n = 4
 	if len(evalJoinSkewedSizes) != n {
-		t.Fatalf("evalJoinSkewedSizes must have length %d", n)
+		b.Fatalf("evalJoinSkewedSizes must have length %d", n)
 	}
 
-	cat := newEvalNTableChainCatalogTB(t, n)
+	cat := newEvalNTableChainCatalogTB(b, n)
 	ascendingOrder := make([]int, n)
 	for i := range ascendingOrder {
 		ascendingOrder[i] = i
@@ -554,17 +563,17 @@ func TestEvalJoinChainSkewedSizesIOCost(t *testing.T) {
 	for i := range descendingOrder {
 		descendingOrder[i] = ascendingOrder[n-1-i]
 	}
-	logicalRootAscendingToDescending := newEvalOrderedChainLogicalJoinTB(t, cat, ascendingOrder)
-	logicalRootDescendingToAscending := newEvalOrderedChainLogicalJoinTB(t, cat, descendingOrder)
+	logicalRootAscendingToDescending := newEvalOrderedChainLogicalJoinTB(b, cat, ascendingOrder)
+	logicalRootDescendingToAscending := newEvalOrderedChainLogicalJoinTB(b, cat, descendingOrder)
 	builder := NewPhysicalPlanBuilder(cat, physicalRulesJoinEval())
-	rowByOID := evalRowLookupForChainTB(t, cat, evalJoinSkewedSizes)
+	rowByOID := evalRowLookupForChainTB(b, cat, evalJoinSkewedSizes)
 
 	scansAsc, joinPredicatesAsc := collectJoinOptimizerInputs(logicalRootAscendingToDescending)
 	indexMetaAsc := newCatalogJoinIndexMeta(scansAsc)
 	scansDesc, joinPredicatesDesc := collectJoinOptimizerInputs(logicalRootDescendingToAscending)
 	indexMetaDesc := newCatalogJoinIndexMeta(scansDesc)
 
-	oidToEval := evalOidToEvalTableIndex(t, cat, n)
+	oidToEval := evalOidToEvalTableIndex(b, cat, n)
 	tableRowsCBO := evalStatsPermutedForScans(scansAsc, evalJoinSkewedSizes, oidToEval)
 	oidAsc := evalOidToScanOrdinal(scansAsc)
 	oidDesc := evalOidToScanOrdinal(scansDesc)
@@ -583,28 +592,70 @@ func TestEvalJoinChainSkewedSizesIOCost(t *testing.T) {
 		},
 	}
 
-	t.Run("physical_small_to_large", func(t *testing.T) {
-		p, err := builder.Build(logicalRootAscendingToDescending)
-		if err != nil {
-			t.Fatalf("Build: %v", err)
+	pAsc, err := builder.Build(logicalRootAscendingToDescending)
+	if err != nil {
+		b.Fatalf("Build ascending: %v", err)
+	}
+	costAsc, _ := EstimatePhysicalPlanJoinOptimizerCost(pAsc, rowByOID, joinPredicatesAsc, 100, indexMetaAsc, oidAsc)
+
+	pDesc, err := builder.Build(logicalRootDescendingToAscending)
+	if err != nil {
+		b.Fatalf("Build descending: %v", err)
+	}
+	costDesc, _ := EstimatePhysicalPlanJoinOptimizerCost(pDesc, rowByOID, joinPredicatesDesc, 100, indexMetaDesc, oidDesc)
+
+	best := cbo.FindBestJoin()
+	if best == nil {
+		b.Fatal("nil CBO plan")
+	}
+
+	if testing.Verbose() {
+		logOnce := func(key string, fn func()) {
+			if _, loaded := skewedChainBenchVerboseOnce.LoadOrStore(key, true); !loaded {
+				fn()
+			}
 		}
-		cost, _ := EstimatePhysicalPlanJoinOptimizerCost(p, rowByOID, joinPredicatesAsc, 100, indexMetaAsc, oidAsc)
-		evalLogPhysicalJoinPlan(t, "── Physical plan (table order: ascending size →) ──", cost, collectPhysicalJoinOperators(p))
+		logOnce("phys_asc", func() {
+			evalLogPhysicalJoinPlan(b, "── Physical plan (table order: ascending size →) ──", costAsc, collectPhysicalJoinOperators(pAsc))
+		})
+		logOnce("phys_desc", func() {
+			evalLogPhysicalJoinPlan(b, "── Physical plan (table order: descending size →) ──", costDesc, collectPhysicalJoinOperators(pDesc))
+		})
+		logOnce("cbo", func() {
+			evalLogCBOPlan(b, "── CBO (skewed stats, scan order = ascending size) ──", best)
+		})
+	}
+
+	b.Run("Physical_small_to_large", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for range b.N {
+			p, err := builder.Build(logicalRootAscendingToDescending)
+			if err != nil {
+				b.Fatal(err)
+			}
+			_, _ = EstimatePhysicalPlanJoinOptimizerCost(p, rowByOID, joinPredicatesAsc, 100, indexMetaAsc, oidAsc)
+		}
 	})
-	t.Run("physical_large_to_small", func(t *testing.T) {
-		p, err := builder.Build(logicalRootDescendingToAscending)
-		if err != nil {
-			t.Fatalf("Build: %v", err)
+
+	b.Run("Physical_large_to_small", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for range b.N {
+			p, err := builder.Build(logicalRootDescendingToAscending)
+			if err != nil {
+				b.Fatal(err)
+			}
+			_, _ = EstimatePhysicalPlanJoinOptimizerCost(p, rowByOID, joinPredicatesDesc, 100, indexMetaDesc, oidDesc)
 		}
-		cost, _ := EstimatePhysicalPlanJoinOptimizerCost(p, rowByOID, joinPredicatesDesc, 100, indexMetaDesc, oidDesc)
-		evalLogPhysicalJoinPlan(t, "── Physical plan (table order: descending size →) ──", cost, collectPhysicalJoinOperators(p))
 	})
-	t.Run("cbo", func(t *testing.T) {
-		best := cbo.FindBestJoin()
-		if best == nil {
-			t.Fatal("nil CBO plan")
+
+	b.Run("CBO", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for range b.N {
+			_ = cbo.FindBestJoin()
 		}
-		evalLogCBOPlan(t, "── CBO (skewed stats, scan order = ascending size) ──", best)
 	})
 }
 

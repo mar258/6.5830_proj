@@ -167,6 +167,13 @@ func (opt *JoinOptimizer) FindBestJoin() *Plan {
 				}
 				joinPredicates := opt.predicatesForJoin(leftMask, i)
 
+				// If the query has join predicates, don't allow disconnected joins.
+				// But if the whole query is a true cross join with no predicates at all,
+				// allow BNLJ fallback.
+				if len(joinPredicates) == 0 && len(opt.Predicates) > 0 {
+					continue
+				}
+
 				candidates := opt.joinCandidates(leftPlan, rightPlan, joinPredicates)
 				jc, outRows, ok, physicalJoin := bestCandidate(candidates)
 				if !ok {

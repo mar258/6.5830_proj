@@ -1,0 +1,47 @@
+{
+  "next_id": 6,
+  "tables": [
+    {
+      "oid": 1,
+      "name": "eval_t0",
+      "columns": [
+        { "name": "id", "type": 1 },
+        { "name": "outer_data", "type": 2 }
+      ],
+      "indexes": [
+        {
+          "oid": 2,
+          "table_oid": 1,
+          "name": "idx_eval_t0_id",
+          "type": "btree",
+          "key_schema": ["id"]
+        }
+      ]
+    },
+    {
+      "oid": 3,
+      "name": "eval_t1",
+      "columns": [
+        { "name": "id", "type": 1 },
+        { "name": "t0_id", "type": 1 },
+        { "name": "inner_data", "type": 2 }
+      ],
+      "indexes": [
+        {
+          "oid": 4,
+          "table_oid": 3,
+          "name": "idx_eval_t1_id",
+          "type": "btree",
+          "key_schema": ["id"]
+        },
+        {
+          "oid": 5,
+          "table_oid": 3,
+          "name": "idx_eval_t1_t0_id",
+          "type": "btree",
+          "key_schema": ["t0_id"]
+        }
+      ]
+    }
+  ]
+}

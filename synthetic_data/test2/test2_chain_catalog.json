@@ -1,0 +1,172 @@
+{
+  "next_id": 21,
+  "tables": [
+    {
+      "oid": 1,
+      "name": "table_0",
+      "columns": [
+        { "name": "id", "type": 1 },
+        { "name": "data_val", "type": 2 }
+      ],
+      "indexes": [
+        {
+          "oid": 2,
+          "table_oid": 1,
+          "name": "idx_table_0_id",
+          "type": "btree",
+          "key_schema": ["id"]
+        }
+      ]
+    },
+    {
+      "oid": 3,
+      "name": "table_1",
+      "columns": [
+        { "name": "id", "type": 1 },
+        { "name": "t0_id", "type": 1 },
+        { "name": "data_val", "type": 2 }
+      ],
+      "indexes": [
+        {
+          "oid": 4,
+          "table_oid": 3,
+          "name": "idx_table_1_id",
+          "type": "btree",
+          "key_schema": ["id"]
+        },
+        {
+          "oid": 5,
+          "table_oid": 3,
+          "name": "idx_table_1_t0_id",
+          "type": "btree",
+          "key_schema": ["t0_id"]
+        }
+      ]
+    },
+    {
+      "oid": 6,
+      "name": "table_2",
+      "columns": [
+        { "name": "id", "type": 1 },
+        { "name": "t1_id", "type": 1 },
+        { "name": "data_val", "type": 2 }
+      ],
+      "indexes": [
+        {
+          "oid": 7,
+          "table_oid": 6,
+          "name": "idx_table_2_id",
+          "type": "btree",
+          "key_schema": ["id"]
+        },
+        {
+          "oid": 8,
+          "table_oid": 6,
+          "name": "idx_table_2_t1_id",
+          "type": "btree",
+          "key_schema": ["t1_id"]
+        }
+      ]
+    },
+    {
+      "oid": 9,
+      "name": "table_3",
+      "columns": [
+        { "name": "id", "type": 1 },
+        { "name": "t2_id", "type": 1 },
+        { "name": "data_val", "type": 2 }
+      ],
+      "indexes": [
+        {
+          "oid": 10,
+          "table_oid": 9,
+          "name": "idx_table_3_id",
+          "type": "btree",
+          "key_schema": ["id"]
+        },
+        {
+          "oid": 11,
+          "table_oid": 9,
+          "name": "idx_table_3_t2_id",
+          "type": "btree",
+          "key_schema": ["t2_id"]
+        }
+      ]
+    },
+    {
+      "oid": 12,
+      "name": "table_4",
+      "columns": [
+        { "name": "id", "type": 1 },
+        { "name": "t3_id", "type": 1 },
+        { "name": "data_val", "type": 2 }
+      ],
+      "indexes": [
+        {
+          "oid": 13,
+          "table_oid": 12,
+          "name": "idx_table_4_id",
+          "type": "btree",
+          "key_schema": ["id"]
+        },
+        {
+          "oid": 14,
+          "table_oid": 12,
+          "name": "idx_table_4_t3_id",
+          "type": "btree",
+          "key_schema": ["t3_id"]
+        }
+      ]
+    },
+    {
+      "oid": 15,
+      "name": "table_5",
+      "columns": [
+        { "name": "id", "type": 1 },
+        { "name": "t4_id", "type": 1 },
+        { "name": "data_val", "type": 2 }
+      ],
+      "indexes": [
+        {
+          "oid": 16,
+          "table_oid": 15,
+          "name": "idx_table_5_id",
+          "type": "btree",
+          "key_schema": ["id"]
+        },
+        {
+          "oid": 17,
+          "table_oid": 15,
+          "name": "idx_table_5_t4_id",
+          "type": "btree",
+          "key_schema": ["t4_id"]
+        }
+      ]
+    },
+    {
+      "oid": 18,
+      "name": "table_6",
+      "columns": [
+        { "name": "id", "type": 1 },
+        { "name": "t5_id", "type": 1 },
+        { "name": "data_val", "type": 2 }
+      ],
+      "indexes": [
+        {
+          "oid": 19,
+          "table_oid": 18,
+          "name": "idx_table_6_id",
+          "type": "btree",
+          "key_schema": ["id"]
+        },
+        {
+          "oid": 20,
+          "table_oid": 18,
+          "name": "idx_table_6_t5_id",
+          "type": "btree",
+          "key_schema": ["t5_id"]
+        }
+      ]
+    }
+  ]
+}

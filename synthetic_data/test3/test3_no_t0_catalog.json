@@ -1,0 +1,105 @@
+{
+  "next_id": 13,
+  "tables": [
+    {
+      "oid": 1,
+      "name": "table_1",
+      "columns": [
+        { "name": "id", "type": 1 },
+        { "name": "t0_id", "type": 1 },
+        { "name": "data_val", "type": 2 }
+      ],
+      "indexes": [
+        {
+          "oid": 2,
+          "table_oid": 1,
+          "name": "idx_table_1_id",
+          "type": "btree",
+          "key_schema": ["id"]
+        },
+        {
+          "oid": 3,
+          "table_oid": 1,
+          "name": "idx_table_1_t0_id",
+          "type": "btree",
+          "key_schema": ["t0_id"]
+        }
+      ]
+    },
+    {
+      "oid": 4,
+      "name": "table_2",
+      "columns": [
+        { "name": "id", "type": 1 },
+        { "name": "t1_id", "type": 1 },
+        { "name": "data_val", "type": 2 }
+      ],
+      "indexes": [
+        {
+          "oid": 5,
+          "table_oid": 4,
+          "name": "idx_table_2_id",
+          "type": "btree",
+          "key_schema": ["id"]
+        },
+        {
+          "oid": 6,
+          "table_oid": 4,
+          "name": "idx_table_2_t1_id",
+          "type": "btree",
+          "key_schema": ["t1_id"]
+        }
+      ]
+    },
+    {
+      "oid": 7,
+      "name": "table_3",
+      "columns": [
+        { "name": "id", "type": 1 },
+        { "name": "t2_id", "type": 1 },
+        { "name": "data_val", "type": 2 }
+      ],
+      "indexes": [
+        {
+          "oid": 8,
+          "table_oid": 7,
+          "name": "idx_table_3_id",
+          "type": "btree",
+          "key_schema": ["id"]
+        },
+        {
+          "oid": 9,
+          "table_oid": 7,
+          "name": "idx_table_3_t2_id",
+          "type": "btree",
+          "key_schema": ["t2_id"]
+        }
+      ]
+    },
+    {
+      "oid": 10,
+      "name": "table_4",
+      "columns": [
+        { "name": "id", "type": 1 },
+        { "name": "t3_id", "type": 1 },
+        { "name": "data_val", "type": 2 }
+      ],
+      "indexes": [
+        {
+          "oid": 11,
+          "table_oid": 10,
+          "name": "idx_table_4_id",
+          "type": "btree",
+          "key_schema": ["id"]
+        },
+        {
+          "oid": 12,
+          "table_oid": 10,
+          "name": "idx_table_4_t3_id",
+          "type": "btree",
+          "key_schema": ["t3_id"]
+        }
+      ]
+    }
+  ]
+}

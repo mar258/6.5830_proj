@@ -39,6 +39,7 @@ planner/
 ├── join_optimizer_shell.go
 ├── physical_plan_builder.go
 └── sql_planner.go
+synthetic_data/
 ```
 
 Key components:
@@ -46,7 +47,8 @@ Key components:
 - `cost_based_optimizer.go`: dynamic programming join enumeration and cost-based plan selection
 - `cost_based_physical_reorder.go`: converts optimized CBO plans into executable GoDB physical plan nodes
 - `cost_based_explain.go`: explain/debug output for optimizer decisions
-- `cost_based_optimizer_test.go`: optimizer tests and benchmarks
+- `cost_based_optimizer_test.go`: optimizer tests
+- `cost_based_optimizer_eval_test.go`: evaluation test benchmarks
 - `physical_plan_builder.go`: integration point for CBO join reordering during physical planning
 - `sql_planner.go`: adds the `PlanWithCBO` planning path
 - `main.go`: shell commands for running normal queries, `cbo` queries, and `joinopt` explanations
@@ -122,7 +124,16 @@ Load the dataset with:
 go run main.go load -catalog mbta/mbta-catalog.json mbta/*.csv
 ```
 
-This creates the generated GoDB data files in the configured database directory.
+This creates the generated GoDB data files in the configured database directory
+
+## Running evaluations 
+
+```bash
+go test ./planner -run '^$' -bench BenchmarkEvalJoinTwoTableOuter1kInner10k -benchmem -v
+go test ./planner -run '^$' -bench 'BenchmarkEvalJoinChain150kTablesIOCost/tables_07/(Rule|CBO)' -benchmem
+go test ./planner -run '^$' -bench BenchmarkEvalJoinChainSkewedSizesIOCost -benchmem -v
+go test ./planner -run '^$' -bench BenchmarkEvalJoinCBOMixesJoinAlgorithms -benchmem -v
+```
 
 ## Running the Tests
 

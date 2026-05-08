@@ -97,7 +97,7 @@ WHERE stations.line_id = lines.line_id;
 
 ## MBTA Dataset Setup
 
-Place the MBTA catalog and cleaned CSV files inside an `mbta/` directory:
+Cleaned MBTA CSV files can be found in the drive. Place the cleaned CSV files along with the MBTA catalog inside an `mbta/` directory:
 
 ```text
 mbta/
@@ -119,4 +119,4 @@ Load the dataset with:
 go run main.go load -catalog mbta/mbta-catalog.json mbta/*.csv
 ```
 
-This creates the generated GoDB data files in the configured database directory. 
+This creates the generated GoDB data files in the configured database directory.

@@ -31,9 +31,12 @@ Important files for the cost-based optimizer:
 main.go
 planner/
 ├── cost_based_optimizer.go
+├── cost_based_optimizer_explain.go
 ├── cost_based_physical_reorder.go
 ├── cost_based_explain.go
 ├── cost_based_optimizer_test.go
+├── cost_based_optimizer_eval_test.go
+├── join_optimizer_shell.go
 ├── physical_plan_builder.go
 └── sql_planner.go
 ```

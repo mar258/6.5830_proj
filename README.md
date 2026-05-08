@@ -120,3 +120,12 @@ go run main.go load -catalog mbta/mbta-catalog.json mbta/*.csv
 ```
 
 This creates the generated GoDB data files in the configured database directory.
+
+## Running the Tests
+
+You can run the provided tests by running the following commands
+
+```text
+go test ./planner -run 'TestCBO' -v
+go test ./planner -run 'TestCBOReorder' -v
+```
